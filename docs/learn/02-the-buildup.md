@@ -483,7 +483,7 @@ if v0 < m0 { m0 = v0 }    // chain 1
 if v1 < m1 { m1 = v1 }    // chain 2, independent
 ```
 
-That's why min/max runs at roughly 3–5 GB/s while `Sum` reaches 25 GB/s on the
+That's why min/max runs at roughly 9.5 GB/s while `Sum` reaches 25 GB/s on the
 same data. It's not a worse implementation; it's a *latency-bound* problem rather
 than a *throughput-bound* one, and no amount of loop restructuring changes that.
 

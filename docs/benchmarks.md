@@ -86,11 +86,19 @@ the same machine and measured in the same run.
 | 32 768 | 6 563 | 40.0 |
 | 4 194 304 | 1 002 336 | 33.5 |
 
-**Reading this:** the tuned loop is **~4× faster** at every size that matters,
-and the plateau at ~25 GB/s (arm64) is the memory-bandwidth ceiling rather than
-a compute limit. That is the correct place for an optimized reduction to end up:
-once the loop is bandwidth-bound, further instruction-level tuning has nothing
-left to win.
+**Reading this:** the tuned loop is **~4× faster** at every size that matters.
+
+> **Correction.** An earlier version of this file claimed the plateau at ~25 GB/s
+> was "the memory-bandwidth ceiling". **That was wrong**, and the mistake survived
+> because it was inferred from the shape of the curve rather than measured.
+>
+> `BenchmarkReadOnlyTuned` walks the same memory with the same loop shape but
+> multiplies by zero instead of accumulating a real add. It reaches **37.8 GB/s** —
+> 49 % faster than `Sum`. So `Sum` is not limited by memory bandwidth at all; it is
+> limited by floating-point add latency still in the dependency chain.
+>
+> See [Bandwidth ceiling](#bandwidth-ceiling) below for the measurements, and
+> [next-steps.md](next-steps.md) §6 for what this means for SIMD and FMA.
 
 Note the small-size behaviour. At n=8 the tuned version is only 1.2× faster,
 and part of that is the removed empty-check, not the unrolled loop. This matches
@@ -116,62 +124,57 @@ data is short slices, measure before adopting these functions.
 
 ## `Min` / `Max`
 
-| arm64, n=4194304 | ns/op | GB/s |
-|---|---|---|
-| `Max` (tuned) | 10 606 687 | 3.2 |
-| amd64, n=4194304 | | |
-| `Max` (tuned) | 1 966 572 | 17.0 |
+arm64, n=4 194 304:
 
-Min/max is roughly **2× slower than summation at the same size** (3.2 GB/s vs
-25.4 GB/s). This is not a defect in the implementation, it is the nature of the
-problem, and it is worth understanding:
+| variant | ns/op | GB/s | vs naive |
+|---|---|---|---|
+| `naiveMinWithNaN` (1 accumulator, fused check) | 6 967 355 | 4.81 | 1.00× |
+| `Min` **before the fix** (tuned scan + separate NaN pass) | 7 053 507 | 4.68 | 0.97× |
+| `Min` **after the fix** (tuned scan, fused NaN check) | 3 538 170 | **9.48** | **1.97×** |
+| `MinPureScan` (tuned scan, no NaN check at all) | 3 502 250 | 9.58 | 1.99× |
+
+> **This section previously reported `Min` as a failure**, measuring 0.98× — no
+> faster than the naive loop. The cause was a second pass over the input for NaN
+> detection, which cost about 2× and cancelled the entire benefit of the tuned
+> scan. That is now fixed by fusing the check into the scan loop, and `Min` is
+> **1.97× faster than naive**.
+>
+> Fusing costs about **1%**: 9.48 GB/s with the check versus 9.58 GB/s without any
+> check at all. The reason it is nearly free is in the next section.
+
+Min/max remains roughly **2.7× slower than summation** at the same size (9.5 GB/s
+vs 25.4 GB/s), and that part *is* the nature of the problem:
 
 > A compare cannot start until the previous compare's result is known. `min` has
-> no equivalent of the `s += a + b` trick, because there is no way to "combine
-> two elements at once" that shortens the chain. Splitting the input into
-> independent partial scans is the *only* available parallelism, and it divides
-> the chain length by the accumulator count rather than eliminating it.
+> no equivalent of the `s += a + b` trick, because there is no way to "combine two
+> elements at once" that shortens the chain. Splitting the input into independent
+> partial scans is the *only* available parallelism, and it divides the chain
+> length by the accumulator count rather than eliminating it.
 
 So scans are **latency-bound** and reductions are **throughput-bound**, and they
-respond to tuning differently. If you see min/max underperforming relative to
-sum, that is expected.
+respond to tuning differently.
 
-### The NaN check doubles the cost of `Min`
+### Why fusing the NaN check is nearly free
 
-`Min`, `Max` and `MinMax` enforce the documented "NaN wins" policy by calling
-`hasNaN`, which walks the input a second time. `BenchmarkMinArchNoNaN` measures the
-scan loop without that pass, so the cost is a measured quantity rather than a
-guess:
+The NaN test accumulates a boolean flag, which the CPU evaluates with integer
+operations on different execution ports than the floating-point compare. The scan
+is latency-bound on the *compare* chain, and the flag does not lengthen that chain.
+A second pass, by contrast, doubles the memory traffic and re-walks the
+latency-bound loop — which is exactly the 2× that was measured.
 
-| arm64, n=4 194 304 | ns/op | GB/s |
-|---|---|---|
-| `naiveMin` (baseline) | 7 001 998 | 4.79 |
-| `minArch` (tuned, no NaN check) | 3 537 183 | 9.49 |
-| `Min` (tuned + NaN check) | 7 192 376 | 4.67 |
+**The arithmetic alternative does not work, and it is worth recording why** so
+nobody retries it. The natural branch-free NaN test is a poison accumulator:
 
-**This is an uncomfortable result and it should be stated plainly: the NaN check
-costs about 2×, which cancels out the entire benefit of the tuned scan.** At
-n=4M, `Min` (4.67 GB/s) is marginally *slower* than the naive one-accumulator loop
-(4.79 GB/s). The tuning is doing its job — `minArch` alone is 1.98× faster than
-naive — but the second pass eats all of it.
+```
+poison += v - v     // 0 for finite v, NaN for NaN
+```
 
-The numbers are within noise of each other at n≥1024, so the fair summary is
-**"the tuned Min is no faster than naive"**, not "the tuned Min is slower".
-
-Options, in rough order of preference:
-
-1. **Fold the NaN check into the scan loop.** This would recover most of the cost,
-   but it adds work to a latency-bound loop, so it needs measuring rather than
-   assuming. It also interacts with the accumulator structure.
-2. **Drop the NaN check and document the weaker guarantee** (comparisons against
-   NaN are false, so NaN is silently skipped). That restores the 1.98× but
-   reintroduces positional behaviour, which is worse than either explicit policy.
-3. **Accept the cost**, on the grounds that correctness beats throughput and 4.7
-   GB/s is still fast.
-
-This is listed as an open decision in [next-steps.md](next-steps.md). It is worth
-deciding rather than leaving, because right now the README advertises tuned scans
-that measure the same as naive ones.
+For finite values this adds 0; for NaN it adds NaN, which contaminates every later
+addition, so `poison != poison` detects it without a compare. The problem: **`Inf −
+Inf` is NaN too**, as is `Inf × 0`. Any array containing an infinity gets falsely
+poisoned, and no branch-free float expression isolates NaN from infinity. Probing
+each candidate against finite, ±0, NaN, +Inf and −Inf confirmed it. Since a compare
+is unavoidable, folding it into the existing loop is the cheapest place to put it.
 
 ### The "NaN wins" policy
 
@@ -230,35 +233,84 @@ problem.
 
 ---
 
+## Bandwidth ceiling
+
+The most useful measurement in this file, because it overturns a claim that was
+previously made here.
+
+Two loops that walk exactly the same memory with exactly the same loop shape
+(four accumulator chains, eight elements per iteration):
+
+```go
+// readOnlyTuned: touches every element, multiplies by zero
+s0 += xs[i] * 0
+s1 += xs[i+2] * 0
+...
+
+// sumArch: touches every element, accumulates a real add
+s0 += xs[i] + xs[i+1]
+s1 += xs[i+2] + xs[i+3]
+...
+```
+
+Same loads. Same bytes. Same unrolling. The only difference is the arithmetic.
+
+arm64, n=4 194 304:
+
+| loop | GB/s | per element |
+|---|---|---|
+| `ReadOnly` (naive, 1 accumulator, `v*0`) | 4.80 | 1.67 ns |
+| `Sum` (tuned, 4×2 adds) | **25.4** | 0.32 ns |
+| `ReadOnlyTuned` (tuned shape, 4×1 mul by zero) | **37.8** | 0.21 ns |
+| `Dot` (tuned, 4×2 mul + add) | **38.4** | 0.21 ns |
+| `Memcpy` (read + write) | 57.6 | — |
+
+**`ReadOnlyTuned` is 49 % faster than `Sum` while doing strictly less arithmetic on
+the same memory.** Therefore:
+
+> **`Sum` is not bandwidth-bound.** It is bound by floating-point add latency that
+> remains in the dependency chain. The plateau at ~25 GB/s is where *this loop
+> shape* tops out, not where the memory system does.
+
+This matters beyond bookkeeping, because the previous version of this file used the
+"bandwidth-bound" claim to argue that SIMD would win nothing. That argument was
+backwards. The remaining bottleneck is arithmetic, which is exactly what SIMD and
+FMA address. Roughly **1.49× appears to be available on arm64** (37.8 / 25.4),
+and `Dot` at 38.4 GB/s suggests it is already closer to the ceiling than `Sum` is.
+
+---
+
 ## Summary table
 
 arm64, n=4 194 304, throughput in GB/s:
 
-| operation | naïve | tuned | speedup | bound by |
+| operation | naïve | tuned | speedup | limited by |
 |---|---|---|---|---|
-| `Sum` | 6.4 | 25.4 | 3.98× | memory bandwidth |
-| `Dot` | 9.6 | 36.7 | 3.81× | memory bandwidth |
-| `Min` | **4.79** | **4.67** | **0.98×** | **compare latency + NaN pass** |
-| `Min` (no NaN check) | 4.79 | 9.49 | 1.98× | compare latency |
+| `Sum` | 6.4 | 25.4 | 3.98× | **add latency** (not bandwidth) |
+| `Dot` | 9.6 | 38.4 | 4.00× | **mul latency** (near ceiling) |
+| `Min` | 4.81 | **9.48** | **1.97×** | compare latency |
+| `Min` (no NaN check) | 4.81 | 9.58 | 1.99× | compare latency |
 | `MinMax` | — | 6.4 | 1.42× vs 2 passes | compare latency |
 | `Add` | 37.0 | 47.0 | 1.27× | memory bandwidth |
+| `ReadOnlyTuned` | — | 37.8 | — | **the practical ceiling for one pass** |
 
 ## Conclusions
 
 1. **The tuning is real, for reductions.** ~4× on `Sum` and `Dot` at realistic
    sizes, measured rather than asserted.
 2. **It is not free at small sizes.** `Dot` at n=8 is 25 % *slower* than naïve.
-3. **Different loops are bound by different things**, so the same tuning strategy
+3. **Different loops are limited by different things**, so the same tuning strategy
    produces very different returns: reductions gain ~4×, elementwise maps gain
    ~1.3×, scans are limited by compare latency no matter what.
-4. **The tuned loops hit the memory-bandwidth ceiling** at large n. Beyond that, no
-   amount of loop restructuring helps; the next step would be to reduce bytes
-   touched, not instructions executed.
-5. **One result here is negative and is reported as such.** The tuned `Min` is no
-   faster than the naive loop once the NaN check is included (0.98×). The tuning
-   works — `minArch` alone is 1.98× — but a second pass over the input consumes the
-   entire gain. This is the single most action-needed item in this file; see
-   [next-steps.md](next-steps.md).
+4. **The reductions are NOT bandwidth-bound** (corrected). A same-shape loop that
+   moves the same bytes but does no real arithmetic reaches 37.8 GB/s against
+   `Sum`'s 25.4 GB/s. The bottleneck is floating-point add latency, which means
+   **SIMD and FMA have real headroom** — see [next-steps.md](next-steps.md) §6.
+5. **Two claims in earlier revisions of this file were wrong**, and both are
+   recorded rather than deleted: the "bandwidth ceiling" reading above, and the
+   assertion that `Min` was no faster than naive. The first was inferred from the
+   shape of a curve instead of measured; the second was a real performance bug,
+   now fixed by fusing the NaN check into the scan loop (0.98× → 1.97×).
 6. **Everything here is reproducible** with the commands at the top of this file.
    If your numbers disagree with these, trust yours — the machine is the
    authority, and this file is only a record of one machine.

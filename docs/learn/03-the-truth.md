@@ -135,12 +135,12 @@ have:
 | operation | naïve | tuned | speedup |
 |---|---|---|---|
 | `Sum` (n=4M) | 6.4 GB/s | **25.4 GB/s** | **3.98×** |
-| `Dot` (n=4M) | 9.6 GB/s | **36.7 GB/s** | **3.81×** |
+| `Dot` (n=4M) | 9.6 GB/s | **38.4 GB/s** | **4.00×** |
+| `Min` (n=4M) | 4.8 GB/s | **9.5 GB/s** | **1.97×** |
 | `Add` (n=4M) | 37.0 GB/s | **47.0 GB/s** | **1.27×** |
-| `Min`/`Max` (n=4M) | — | 3.2 GB/s | *latency-bound* |
 | `Dot` (n=8) | 25.7 GB/s | 20.6 GB/s | **0.80× — slower!** |
 
-Three things to notice, because they *are* the lesson:
+Four things to notice, because they *are* the lesson:
 
 1. **~4× is real** for the reductions, at every size that matters.
 2. **`Add` only gained 1.27×**, not 4× — because it had no dependency chain to
@@ -150,6 +150,41 @@ Three things to notice, because they *are* the lesson:
    wrong, `Add` would have gained 4× too.
 3. **`Dot` at n=8 got 25 % slower.** The tuning has a cost, and on short slices you
    pay it without collecting the benefit.
+4. **`Min` gains ~2×, not ~4×**, because a compare cannot be shortened the way
+   `s += a + b` shortens an add.
+
+### Two things the measurements got wrong
+
+This is the part worth internalising, because it happened twice.
+
+**First:** an earlier version of this documentation said the reductions "plateau at
+the memory-bandwidth ceiling", inferred from the shape of the curve. It was never
+measured. When it finally was, by writing a loop with the *same shape* that moves
+the same bytes but does no real arithmetic, the answer came out differently:
+
+```
+ReadOnlyTuned (4 chains, multiply by zero)   37.8 GB/s
+Sum           (4 chains, real adds)          25.4 GB/s
+```
+
+Same loads, same bytes, same unrolling — 49 % apart. So `Sum` is **not**
+bandwidth-bound. It is bound by floating-point add latency. The plateau was where
+*this loop shape* tops out, not where the memory system does. And that error had a
+consequence: it was being used to argue that SIMD would win nothing, when in fact
+it is exactly what would help.
+
+**Second:** `Min` was reported here as a failure — no faster than a naive loop —
+because the NaN check was a second pass over the input. Written that way, it cost
+2× and cancelled the entire benefit of the tuned scan. Folding the check into the
+scan loop made it nearly free, and `Min` went from 4.68 GB/s to 9.48 GB/s.
+
+Both mistakes had the same root cause: **a conclusion reached by reasoning about
+the code instead of measuring it.** The plateau *looked* like a bandwidth ceiling.
+The NaN check *looked* like it had to cost a pass. Neither survived contact with a
+benchmark.
+
+> **Reading code tells you what someone intended. Measuring tells you what
+> happened.** They are different activities, and only one of them is evidence.
 
 > **Being "optimized" is not a property a function has.** It is a relationship
 > between a function and a workload. `Dot` is 3.81× faster at n=4M and 0.80×

@@ -55,42 +55,72 @@ Coverage, applied to every operation:
 * accuracy against a 200-bit `big.Float` reference
 * **NaN propagation at every position**, including index 0 and index n-1
 
-## 3. Open decision (highest priority): the NaN check costs the entire scan speedup
+## 3. Resolved: the NaN check cost the entire scan speedup
 
-This is the most action-needed item in the repo.
+This was the highest-priority item in the repo. It is now fixed.
 
-`Min`, `Max` and `MinMax` enforce the documented "NaN wins" policy by calling
-`hasNaN`, which walks the input a second time. Measured at n=4M on arm64:
+**The problem.** `Min`, `Max` and `MinMax` enforced the "NaN wins" policy by
+calling `hasNaN`, which walked the input a second time. Measured at n=4M on arm64:
 
 | | GB/s | vs naive |
 |---|---|---|
-| naive loop | 4.79 | 1.00× |
-| `minArch` (tuned, no NaN check) | 9.49 | **1.98×** |
-| `Min` (tuned + NaN check) | 4.67 | **0.98×** |
+| naive loop | 4.81 | 1.00× |
+| tuned scan, no NaN check | 9.58 | 1.99× |
+| tuned scan + separate NaN pass | 4.68 | 0.97× |
 
-The tuning works. The second pass eats all of it. **The README currently advertises
-tuned scans that measure the same as naive ones**, which needs either fixing or
-documenting honestly.
+The tuning worked; the second pass ate all of it.
 
-Three options, in rough order of preference:
+**The fix.** Fuse the NaN check into the scan loop. Now 9.48 GB/s, **1.97× vs
+naive**, within 1% of a scan with no check at all.
 
-1. **Fold NaN detection into the scan loop.** Write the loop so NaN handling is
-   part of the comparison rather than a separate pass. This is the right fix if it
-   works, but the scan is latency-bound, so adding work to the loop is not free —
-   it must be measured, not assumed. Note that the loop structure would likely
-   change (the accumulator can no longer be seeded naively from `xs[0]`).
-2. **Drop the check and document the weaker guarantee.** Restores 1.98×, but the
-   behaviour becomes positional: a NaN at index 0 gets overwritten, a NaN at the
-   end gets returned. That is worse than either explicit policy, so this is only
-   acceptable if the documentation is very loud about it.
-3. **Accept the cost.** Defensible on the grounds that correctness beats throughput
-   and 4.7 GB/s is still fast. But then the README should stop implying the scans
-   are tuned to be faster.
+**Why it works, and the false lead.** The NaN test accumulates a boolean flag,
+evaluated with integer operations on different execution ports than the
+floating-point compare. Since the scan is latency-bound on the compare chain, the
+flag costs nothing. A second pass, by contrast, doubles the memory traffic.
 
-**Do not leave it undecided.** Right now the code and the documentation disagree
-about what the scans deliver.
+The obvious branch-free alternative was tried first and does not work, which is
+worth recording: `poison += v - v` is 0 for finite values and NaN for NaN, so it
+looks like a comparison-free NaN detector. But **`Inf - Inf` is NaN too**, as is
+`Inf × 0`, so any array containing an infinity is falsely poisoned. There is no
+branch-free float expression that isolates NaN from infinity. Probing each
+candidate against finite, ±0, NaN and ±Inf confirmed it. Since a compare is
+unavoidable, the cheapest place for it is inside the loop that is already reading
+the data.
 
-## 4. What is not verified
+**Verified by:** `TestScansPropagateNaN` (every position),
+`TestScansPropagateNaNAtBoundaries` (index 0 and n-1, which the loop seeds from),
+`TestScansSmallInputsNaNBehaviour` (±Inf not poisoned),
+`TestScansInfinitiesAreNotNaN`, and `BenchmarkMinPureScan` as the upper bound.
+
+**Follow-up if this regresses:** if `BenchmarkMin` ever drifts far from
+`BenchmarkMinPureScan` again, the fusion has been undone. That gap is the
+regression detector, which is why the pure-scan benchmark exists.
+
+## 4. Answered: the reductions are not bandwidth-bound
+
+This was listed as an open question (§6.6 in an earlier revision) on the grounds
+that if the loops were bandwidth-bound, SIMD would win nothing. It was measured
+rather than assumed, and the assumption was wrong.
+
+`BenchmarkReadOnlyTuned` walks the same memory with the same loop shape but
+multiplies by zero instead of accumulating a real add:
+
+| arm64, n=4M | GB/s |
+|---|---|
+| `Sum` (4 chains, 2 adds each) | 25.4 |
+| `ReadOnlyTuned` (4 chains, mul by zero) | **37.8** |
+| `Memcpy` (read + write) | 57.6 |
+
+`ReadOnlyTuned` is **49% faster while doing strictly less arithmetic on the same
+bytes**. So `Sum` is limited by floating-point add latency still in the dependency
+chain, not by memory bandwidth. Roughly **1.49× appears available** on arm64 by
+reducing instruction count per element rather than bytes touched.
+
+The earlier claim was inferred from the shape of a plateau instead of measured. It
+is corrected in [benchmarks.md](benchmarks.md), where the mistake is recorded
+rather than quietly edited out.
+
+## 5. What is not verified
 
 * **Native x86-64 throughput.** The amd64 figures were taken under Rosetta 2,
   which translates x86-64 to ARM64 rather than executing it natively. Correctness
@@ -103,7 +133,7 @@ about what the scans deliver.
 * **Concurrency.** Nothing here is safe to call concurrently against a shared
   destination slice, and that is not documented outside the aliasing note.
 
-## 5. Numerical properties to be aware of
+## 6. Numerical properties to be aware of
 
 Deliberate properties, not defects — but the kind that surprise people in
 production:
@@ -124,56 +154,68 @@ production:
 4. **`Min`/`Max` return `±Inf` on empty input**, making them usable as running
    identities — which also means an empty slice is not an error. Callers decide.
 
-5. **`Min`/`Max`/`MinMax` return NaN if any input element is NaN.** This is now
-   specified, implemented, and tested. See §3 for its performance cost.
+5. **`Min`/`Max`/`MinMax` return NaN if any input element is NaN.** Specified,
+   implemented, tested, and now cheap. See §3.
 
-## 6. Further open decisions
+## 7. Further open decisions
 
 1. **Compensated summation.** Offer `SumKahan`/`SumNeumaier` for callers who need
    accuracy more than throughput. The test infrastructure already exists —
-   `exactSum` in `vec/sum_test.go` is a 200-bit reference.
+   `exactSum` in `vec/helpers_test.go` is a 200-bit reference.
 
 2. **Fused multiply-add.** `Dot` and `SumSq` currently compile to a separate
    multiply and add. With hardware FMA this could be one instruction with one
-   rounding, which is both faster and *more accurate*. Worth measuring — but it
-   changes results again, so it interacts with §5.2 and §6.3.
+   rounding, which is both faster and *more accurate*. Since §4 established that
+   the reductions are arithmetic-bound rather than bandwidth-bound, FMA is now a
+   well-motivated optimization rather than a speculative one. It changes results
+   again, so it interacts with §6.2 and §7.3.
 
 3. **Reproducible summation via assembly.** If cross-architecture
    bit-reproducibility is required, the only way to keep the tuned loops is for each
    architecture to emit *identical* arithmetic operations in an identical order,
    differing only in scheduling. That is a genuine design constraint and should be
    decided early if it matters.
-
-4. **Two-pass algorithms.** `Mean` is one pass, but a variance/covariance
-   implementation would naturally be two. **No amount of loop tuning fixes reading
-   the input twice** — the fix is a one-pass algorithm (Welford's). Worth deciding
-   before implementing variance.
-
 5. **SIMD.** The current approach is scalar-accumulator ILP relying on the
    compiler's autovectorizer. Explicit NEON/AVX2 intrinsics would need CGo or
    assembly, breaking the zero-dependency pure-Go constraint in the README. A
    middle path is `GOAMD64=v3`-gated code, which preserves that constraint.
-   Whether it is worth doing depends on §6.6.
 
-6. **Is there headroom left?** [benchmarks.md](benchmarks.md) shows the tuned
-   reductions plateauing at the machine's memory bandwidth. If they are truly
-   bandwidth-bound, SIMD wins nothing: the bytes are already moving as fast as the
-   memory controller allows. Settling this is a prerequisite for §6.5, not a
-   follow-up to it.
+   §4 changed this from "probably pointless" to "worth trying": there is ~1.49×
+   of arithmetic headroom, so reducing instructions per element is the right
+   target. It is a larger change than FMA (§7.2) and has a lower expected payoff
+   than the measured 1.49× cap, so try FMA first.
 
-## 7. Suggested order of work
+6. **Is there headroom left?** Yes — see §4. Measured, not assumed. Roughly 1.49×
+   on arm64 for `Sum`, bounded by a same-shape loop that does no real arithmetic.
+
+## 8. Suggested order of work
 
 ```mermaid
 graph LR
-    A["1. Fix or document<br/>the NaN cost (§3)"] --> B["2. Decide reproducibility<br/>requirement (§5.2)"]
-    B --> C["3. Is it bandwidth-bound?<br/>(compare to memcpy)"]
-    C --> D["4. Only then consider<br/>FMA / SIMD"]
-    D --> E["5. Re-benchmark on<br/>native x86-64"]
-    style A fill:#ffcccc
-    style E fill:#d4f4d4
+    A["1. Fix the NaN cost (§3)"] --> B["2. Is it bandwidth-bound? (§4)"]
+    B --> C["3. FMA for Dot/SumSq (§7.2)<br/>~1.49x headroom, or not"]
+    C --> D["4. Decide reproducibility (§6.2)"]
+    D --> E["5. SIMD (§7.5)<br/>only if FMA leaves room"]
+    E --> F["6. Re-benchmark on<br/>native x86-64"]
+    style A fill:#d4f4d4
+    style B fill:#d4f4d4
+    style C fill:#ffe9b3
+    style F fill:#ffcccc
 ```
 
-§3 first, because the code and the documentation currently disagree. §5.2 second,
-because it is a decision that gates what the arithmetic is even allowed to do.
-§6.6 third, because it determines whether §6.5 is a conversation worth having: if
-the loops are already at memory bandwidth, they are not.
+**Done:** §3 and §4. Both were resolved by measuring rather than reasoning, and both
+overturned an assumption that had been stated as fact in this repository — the NaN
+check turned out to be nearly free when fused, and the reductions turned out not to
+be bandwidth-bound at all.
+
+**Next:** FMA (§7.2). It now has a measured motivation rather than a speculative
+one: the bottleneck is arithmetic latency, and FMA removes an operation per
+element while also improving accuracy by rounding once instead of twice.
+
+**Still blocked on hardware:** §8.6. The x86-64 figures in this repository come
+from Rosetta 2, so any decision that depends on x86-64 magnitudes needs a native
+machine to confirm.
+
+**Still a decision, not work:** §6.2 (reproducibility). It gates what the
+arithmetic is even allowed to do, so it is worth settling before adding more
+operations rather than after.

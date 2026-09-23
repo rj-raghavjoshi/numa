@@ -109,9 +109,10 @@ All `*To` functions permit `dst` to alias the inputs.
   selected at compile time by build tags. No CGo, no assembly, no intrinsics —
   just Go arranged so the compiler's SSA backend generates the code we want.
 * **Measured, not asserted.** **3.98×** faster than a plain loop on `Sum` at
-  n=4M, **3.81×** on `Dot`, **1.27×** on elementwise `Add`. The difference
-  between those figures is the most interesting result in the repo, and it is
-  explained in [docs/benchmarks.md](docs/benchmarks.md).
+  n=4M, **4.00×** on `Dot`, **1.97×** on `Min`/`Max`, **1.27×** on elementwise
+  `Add`. The difference between those figures is the most interesting result in
+  the repo, and [docs/benchmarks.md](docs/benchmarks.md) explains what each loop
+  is actually waiting on.
 * **Numerically stable.** Reassociated tree reductions, so the tuned result is
   typically *closer* to the exact answer than a naive left-to-right fold, not
   further from it. Checked against a 200-bit `big.Float` reference.
@@ -134,16 +135,20 @@ anything where the last bits matter.
    25 % *slower* than the plain loop. If your data is short slices, benchmark
    before adopting these functions.
 
-4. **The scans are not currently faster than a naive loop.** `Min`/`Max` enforce a
-   "NaN wins" policy with a second pass over the input, which costs about 2× and
-   consumes the entire benefit of the tuned scan (measured 0.98× vs naive at
-   n=4M). The tuned scan *loop* is 1.98× faster — it is the NaN check that eats
-   it. This is flagged as the highest-priority open item in
-   [docs/next-steps.md](docs/next-steps.md) §3.
+4. **The scans are ~2× faster than a naive loop, not ~4×.** `Sum` and `Dot` gain
+   about 4×, but `Min`/`Max`/`MinMax` gain **1.97×**, because a compare is
+   inherently latency-bound and no accumulator trick shortens the chain the way
+   `s += a + b` shortens an add. That is the nature of the operation, not a weak
+   implementation.
 
 5. **`Min`/`Max`/`MinMax` return NaN** if any input element is NaN. This is
    specified and tested, unlike a naive implementation whose result depends on
    where the NaN sits.
+
+The reductions are **not** memory-bandwidth-bound — a same-shape loop that moves
+the same bytes but does no real arithmetic reaches 37.8 GB/s against `Sum`'s
+25.4 GB/s. The remaining bottleneck is arithmetic latency, so FMA and SIMD have
+real headroom. See [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Testing
 

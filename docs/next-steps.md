@@ -1,208 +1,179 @@
-# NEXT_STEPS.md
+# Next Steps
 
-Companion to `docs/WHY_IS_THIS_FAST.md`.
+Companion to [learn/](learn/), [design.md](design.md) and
+[benchmarks.md](benchmarks.md).
 
-That document explains *why* the code is shaped the way it is. This document
-records what I actually **verified**, what I **did not**, and what needs to be
-built before "optimized" is a fact rather than a claim.
+The tutorial explains the reasoning. The design doc covers the structure. The
+benchmark file records the numbers. This file records what is verified, what is
+open, and what should be done next.
 
 ---
 
-## 1. What I verified
+## 1. A correction
 
-```sh
-go vet ./... && go build ./...
-# -> BUILD_OK
-```
+An earlier revision of this documentation claimed a correctness bug in the ARM64
+summation: that `i += 8` advanced past two of the four elements the loop body
+read, silently skipping half the input.
 
-The package compiles cleanly under `go1.26.5 darwin/arm64` with no vet findings.
-That is the only thing currently proven.
+**That claim was wrong.** It came from reading the source and reasoning about what
+it "should" do, without checking what actually executes. The disassembly settles
+it: the compiler emits `ADD $4, R3, R3`, because the extra `+4` is dead arithmetic
+(nothing reads `xs[i+4]`) and is folded away.
 
-## 2. What I found: a correctness bug in `sum_arm64.go`
+The full story, with the disassembly and the lesson, is in
+[learn/03-the-truth.md](learn/03-the-truth.md) section 3. The short version:
 
-The ARM64 main loop is:
+> **The source code is a hint. The compiled binary is the truth.** Verify by
+> disassembling or by measuring — never by inspection.
 
-```go
-for i < limit {              // limit := n - 3
-    s0 += xs[i] + xs[i+1]    // touches xs[i],   xs[i+1]
-    s1 += xs[i+2] + xs[i+3]  // touches xs[i+2], xs[i+3]
-    i += 8                   // <-- advances by 8, but only 4 numbers consumed
-}
-```
+`TestSumKnownValues` in `vec/sum_test.go` now pins the exact result at lengths 1
+through 100, so this specific concern cannot silently regress.
 
-It consumes **4** elements per iteration but advances `i` by **8**, so it skips
-half of the array (and the tail loop then picks up from the wrong place).
+## 2. What is verified
 
-For `n = 12`, `limit = 9`:
+| check | command | status |
+|---|---|---|
+| arm64 tests | `go test ./vec/` | **pass** |
+| amd64 tests (Rosetta 2) | `GOARCH=amd64 go test ./vec/` | **pass** |
+| arm64 vet | `go vet .` | **pass** |
+| amd64 vet | `GOARCH=amd64 go vet .` | **pass** |
+| generic vet (386, riscv64, js/wasm) | `GOOS/GOARCH=… go vet .` | **pass** |
+| formatting | `gofmt -l .` | **clean** |
+| benchmarks | `go test ./vec/ -bench=. -benchmem` | **run** — see [benchmarks.md](benchmarks.md) |
 
-| iteration | `i` | reads | `i` after |
-|---|---|---|---|
-| 1 | 0 | `xs[0..3]` | 8 |
-| 2 | 8 | `xs[8..11]` | 16 |
+Coverage, applied to every operation:
 
-`xs[4..7]` are never read. **The result is wrong.**
+* all boundary lengths 0–17, plus 23–25, 31–33, 63–65, 127–129
+* agreement with a reference implementation
+* **per-element perturbation** (catches skipped or double-counted elements)
+* hand-computed known values (catches errors hidden inside a relative tolerance)
+* empty and nil inputs
+* mismatched lengths
+* `dst` aliasing `xs`, `ys`, and both simultaneously
+* panic on length mismatch for every `*To` variant
+* identity cross-checks: `SumSq(xs) == Dot(xs, xs)`, `Mean(xs) == Sum(xs)/n`
+* accuracy against a 200-bit `big.Float` reference
+* **NaN propagation at every position**, including index 0 and index n-1
 
-`sum_amd64.go` does not have this bug — it reads `xs[i]`…`xs[i+7]` and advances
-by 8 consistently.
+## 3. Open decision (highest priority): the NaN check costs the entire scan speedup
 
-### Repro / verification (not yet in the repo)
+This is the most action-needed item in the repo.
 
-There are currently **no tests at all** (`**/*_test.go` matched nothing), so this
-bug is invisible to `go test`. The minimal check:
+`Min`, `Max` and `MinMax` enforce the documented "NaN wins" policy by calling
+`hasNaN`, which walks the input a second time. Measured at n=4M on arm64:
 
-```sh
-# once a test file exists
-go test ./vec/ -run TestSumMatchesGeneric -v
-```
+| | GB/s | vs naive |
+|---|---|---|
+| naive loop | 4.79 | 1.00× |
+| `minArch` (tuned, no NaN check) | 9.49 | **1.98×** |
+| `Min` (tuned + NaN check) | 4.67 | **0.98×** |
 
-I could not run a real repro without adding test files, which I've deliberately
-left to you so you can decide on the shape of the suite. The manual inspection
-above is unambiguous though — the loop bound and the stride disagree.
+The tuning works. The second pass eats all of it. **The README currently advertises
+tuned scans that measure the same as naive ones**, which needs either fixing or
+documenting honestly.
 
-### The fix (choose one)
+Three options, in rough order of preference:
 
-**Option A — minimal:** keep 2 accumulators, advance by 4.
+1. **Fold NaN detection into the scan loop.** Write the loop so NaN handling is
+   part of the comparison rather than a separate pass. This is the right fix if it
+   works, but the scan is latency-bound, so adding work to the loop is not free —
+   it must be measured, not assumed. Note that the loop structure would likely
+   change (the accumulator can no longer be seeded naively from `xs[0]`).
+2. **Drop the check and document the weaker guarantee.** Restores 1.98×, but the
+   behaviour becomes positional: a NaN at index 0 gets overwritten, a NaN at the
+   end gets returned. That is worse than either explicit policy, so this is only
+   acceptable if the documentation is very loud about it.
+3. **Accept the cost.** Defensible on the grounds that correctness beats throughput
+   and 4.7 GB/s is still fast. But then the README should stop implying the scans
+   are tuned to be faster.
 
-```go
-limit := n - 3
-for i < limit {
-    s0 += xs[i] + xs[i+1]
-    s1 += xs[i+2] + xs[i+3]
-    i += 4
-}
-```
+**Do not leave it undecided.** Right now the code and the documentation disagree
+about what the scans deliver.
 
-**Option B — match x86-64:** 4 accumulators, advance by 8.
+## 4. What is not verified
 
-```go
-limit := n - 7
-for i < limit {
-    s0 += xs[i] + xs[i+1]
-    s1 += xs[i+2] + xs[i+3]
-    s2 += xs[i+4] + xs[i+5]
-    s3 += xs[i+6] + xs[i+7]
-    i += 8
-}
-// ...
-return (s0 + s1) + (s2 + s3)
-```
+* **Native x86-64 throughput.** The amd64 figures were taken under Rosetta 2,
+  which translates x86-64 to ARM64 rather than executing it natively. Correctness
+  is genuinely verified there; absolute performance is not representative. Any
+  decision resting on x86-64 magnitudes needs real hardware.
+* **`GOAMD64`/`GOARM` variants.** `GOAMD64=v3` (AVX2) and above are untested. The
+  tuning here is scalar-accumulator ILP rather than SIMD, so the variant should
+  matter less than usual — a prediction, not a measurement.
+* **Compensated summation.** No Kahan/Neumaier variant is offered.
+* **Concurrency.** Nothing here is safe to call concurrently against a shared
+  destination slice, and that is not documented outside the aliasing note.
 
-Pick based on measurement, not taste — which is the point of the next section.
+## 5. Numerical properties to be aware of
 
-## 3. What's missing: benchmarks
+Deliberate properties, not defects — but the kind that surprise people in
+production:
 
-The README claims "high-throughput" and "designed around ... register
-saturation." Right now **nothing measures that**. Without numbers, "most
-optimized" is a hypothesis.
+1. **The reductions reassociate.** `Sum` may differ in the last bits from a plain
+   `for` loop. `TestSumIsNotLessAccurateThanNaive` checks the tuned result is no
+   *further* from the exact answer than the naïve one, which is a different
+   property from agreeing with the naïve loop.
 
-Suggested first harness, `vec/bench_test.go`:
+2. **No cross-architecture reproducibility.** arm64 and amd64 run different loop
+   shapes and may return different last bits for identical input. If you need a
+   reproducible audit trail, this package cannot provide one as currently designed.
 
-```go
-func BenchmarkSum(b *testing.B) {
-    for _, n := range []int{8, 1e3, 1e5, 1e7} {
-        xs := make([]float64, n)
-        for i := range xs {
-            xs[i] = float64(i%17) * 0.5
-        }
-        b.Run(fmt.Sprint(n), func(b *testing.B) {
-            b.SetBytes(int64(8 * n))
-            var sink float64
-            for i := 0; i < b.N; i++ {
-                sink = Sum(xs)
-            }
-            _ = sink
-        })
-    }
-}
-```
+3. **`(xs+ys)-ys != xs`, exactly.** The round trip is accurate only to within a
+   relative epsilon. `TestAddSubRoundTrip` asserts the tolerance rather than
+   equality, and documents why.
 
-Run with:
+4. **`Min`/`Max` return `±Inf` on empty input**, making them usable as running
+   identities — which also means an empty slice is not an error. Callers decide.
 
-```sh
-go test ./vec/ -bench=BenchmarkSum -benchmem -count=10
-```
+5. **`Min`/`Max`/`MinMax` return NaN if any input element is NaN.** This is now
+   specified, implemented, and tested. See §3 for its performance cost.
 
-Notes that matter for honest numbers:
+## 6. Further open decisions
 
-* Use `-count=10`; single runs on a laptop are noise.
-* Report **GB/s**, not ns/op, so you can compare against memory bandwidth and
-  see whether you're compute- or bandwidth-bound. `b.SetBytes` gives you this.
-* Include a small `n` (like 8). The tuned version should **lose** there. If it
-  doesn't, something is off.
-* Use benchstat (`go install golang.org/x/perf/cmd/benchstat@latest`) before
-  concluding anything.
+1. **Compensated summation.** Offer `SumKahan`/`SumNeumaier` for callers who need
+   accuracy more than throughput. The test infrastructure already exists —
+   `exactSum` in `vec/sum_test.go` is a 200-bit reference.
 
-## 4. What's missing: a correctness test
+2. **Fused multiply-add.** `Dot` and `SumSq` currently compile to a separate
+   multiply and add. With hardware FMA this could be one instruction with one
+   rounding, which is both faster and *more accurate*. Worth measuring — but it
+   changes results again, so it interacts with §5.2 and §6.3.
 
-The bar is: the tuned path must agree with the plain loop to within accumulated
-rounding error, **for every length**, especially the awkward ones around the
-loop boundaries (`n = 0,1,2,3,4,7,8,9,11,12,15,16,17`).
+3. **Reproducible summation via assembly.** If cross-architecture
+   bit-reproducibility is required, the only way to keep the tuned loops is for each
+   architecture to emit *identical* arithmetic operations in an identical order,
+   differing only in scheduling. That is a genuine design constraint and should be
+   decided early if it matters.
 
-```go
-func TestSumMatchesGeneric(t *testing.T) {
-    rng := rand.New(rand.NewSource(1))
-    for n := 0; n <= 64; n++ {
-        xs := make([]float64, n)
-        for i := range xs {
-            xs[i] = rng.NormFloat64()
-        }
-        want, got := naiveSum(xs), Sum(xs)
-        // relative tolerance: reassociation changes the last bits legitimately
-        tol := 1e-12 * math.Max(1, math.Abs(want))
-        if math.Abs(want-got) > tol {
-            t.Fatalf("n=%d: want %v, got %v", n, want, got)
-        }
-    }
-}
-```
+4. **Two-pass algorithms.** `Mean` is one pass, but a variance/covariance
+   implementation would naturally be two. **No amount of loop tuning fixes reading
+   the input twice** — the fix is a one-pass algorithm (Welford's). Worth deciding
+   before implementing variance.
 
-The boundary lengths are the whole point — that's where the `n - 3` / `n - 7`
-arithmetic and the tail loop get exercised.
+5. **SIMD.** The current approach is scalar-accumulator ILP relying on the
+   compiler's autovectorizer. Explicit NEON/AVX2 intrinsics would need CGo or
+   assembly, breaking the zero-dependency pure-Go constraint in the README. A
+   middle path is `GOAMD64=v3`-gated code, which preserves that constraint.
+   Whether it is worth doing depends on §6.6.
 
-## 5. What's missing: a cross-check against big.Float
-
-Because the tuned version **reassociates** (see Part 11.4 of the explainer),
-there is no single "correct" float64 answer. The meaningful reference is the
-*exact* sum in higher precision:
-
-```go
-func exactSum(xs []float64) *big.Float {
-    acc := new(big.Float).SetPrec(200)
-    for _, v := range xs {
-        acc.Add(acc, big.NewFloat(v))
-    }
-    return acc
-}
-```
-
-Then assert the float64 result is within a few ULPs of the exactly-rounded
-result. This catches *stability regressions*, which is the actual claim the
-README makes ("prevent catastrophic cancellation") — and it's a claim that the
-naive test in §4 cannot check.
-
-## 6. What's missing: documentation of the contract
-
-Two things the public API should state, once you've decided them:
-
-1. **Is `Sum` order-independent?** `(s0+s1)+(s2+s3)` and
-   `((s0+s1)+s2)+s3` differ in the last bits. Whatever you choose, say it.
-2. **Does `Sum` guarantee bit-identical results across architectures?** Right
-   now it does not, and cannot — different `GOARCH` runs different loop shapes.
-   If you need reproducibility (e.g. for a trading audit trail), that's a design
-   constraint you have to design *for*, not bolt on later.
+6. **Is there headroom left?** [benchmarks.md](benchmarks.md) shows the tuned
+   reductions plateauing at the machine's memory bandwidth. If they are truly
+   bandwidth-bound, SIMD wins nothing: the bytes are already moving as fast as the
+   memory controller allows. Settling this is a prerequisite for §6.5, not a
+   follow-up to it.
 
 ## 7. Suggested order of work
 
 ```mermaid
 graph LR
-    A["1. Correctness test<br/>(catches the i+=8 bug)"] --> B["2. Fix the bug<br/>(Option A or B)"]
-    B --> C["3. Benchmark harness<br/>+ benchstat"]
-    C --> D["4. Measure A vs B vs generic<br/>pick the winner"]
-    D --> E["5. Document the contract<br/>in Sum's doc comment"]
+    A["1. Fix or document<br/>the NaN cost (§3)"] --> B["2. Decide reproducibility<br/>requirement (§5.2)"]
+    B --> C["3. Is it bandwidth-bound?<br/>(compare to memcpy)"]
+    C --> D["4. Only then consider<br/>FMA / SIMD"]
+    D --> E["5. Re-benchmark on<br/>native x86-64"]
     style A fill:#ffcccc
     style E fill:#d4f4d4
 ```
 
-Do them in that order. Step 1 before step 2, because a fix without a test is
-just a new unverified claim. Step 4 before step 5, because you can't document a
-decision you haven't measured.
+§3 first, because the code and the documentation currently disagree. §5.2 second,
+because it is a decision that gates what the arithmetic is even allowed to do.
+§6.6 third, because it determines whether §6.5 is a conversation worth having: if
+the loops are already at memory bandwidth, they are not.

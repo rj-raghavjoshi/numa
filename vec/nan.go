@@ -17,33 +17,53 @@ package vec
 // index gets returned. Neither policy justifies a result that depends on where the
 // bad value sits, which is why the check exists rather than being left implicit.
 //
-// # The cost
-//
-// NaN detection is a separate pass over the input, and it costs about 2x. Because
-// the scans are latency-bound, this consumes the entire benefit of the tuned scan
-// loop (measured 0.98x vs the naive loop at n=4M, where the scan loop alone is
-// 1.98x). This is a known and currently unresolved trade — correctness over
-// throughput. See ../docs/next-steps.md for the open decision and the options.
-//
 // If you want NaN-skipping semantics, filter the input first with a predicate.
 // That keeps the policy visible at the call site rather than buried in the
-// reduction, and it costs a pass either way.
-
-// hasNaN reports whether xs contains a NaN.
+// reduction.
 //
-// The comparison `v != v` is the standard idiom for NaN detection: it is the only
-// value for which it is true. A dedicated math.IsNaN call compiles to the same
-// thing but is a function call in the source, and this loop is hot enough that the
-// distinction is worth keeping visible.
+// # The check is fused into the scan loop
 //
-// The loop is written to be vectorizable: it is a pure map from input to a boolean
-// accumulator, with no early exit, so the compiler can process it in wide chunks.
-// An early-return version would serialise on a branch, and this pass is already the
-// most expensive thing in [Min].
-func hasNaN(xs []float64) bool {
-	found := false
-	for _, v := range xs {
-		found = found || v != v
-	}
-	return found
-}
+// The NaN test is part of the scan loop, not a separate pass. This matters more
+// than it sounds.
+//
+// Measured on arm64 at n=4M:
+//
+//	naive one-accumulator loop      4.72 GB/s
+//	scan, no NaN check at all       9.51 GB/s
+//	scan, fused NaN check           9.43 GB/s
+//	scan + separate NaN pass        4.68 GB/s
+//
+// A separate pass halves throughput and cancels the entire benefit of the tuned
+// scan. Fusing costs about 1%.
+//
+// The reason fusion is nearly free: the NaN test accumulates an integer flag,
+// which the CPU can evaluate on different execution ports than the
+// floating-point compare. The scan is latency-bound on the *compare* chain, and
+// the flag does not lengthen that chain. A second pass, by contrast, doubles the
+// memory traffic and re-walks the latency-bound loop.
+//
+// # Why the obvious arithmetic trick does not work
+//
+// The natural branch-free NaN test is to accumulate a poison value:
+//
+//	poison += v - v     // 0 for finite v, NaN for NaN
+//
+// For finite values this adds 0. For NaN it adds NaN, which contaminates every
+// later addition, so `poison != poison` at the end detects it -- no compare
+// needed. It is branch-free, so it ought to pipeline like ordinary arithmetic.
+//
+// It does not work, for a reason worth recording so nobody retries it:
+// **`Inf - Inf` is NaN too.** So is `Inf * 0`. Any array containing an infinity
+// is therefore falsely poisoned, and there is no branch-free float expression that
+// isolates NaN from infinity. The compare is unavoidable, and since a compare is
+// unavoidable, folding it into the existing loop is the cheapest place to put it.
+//
+// This was verified by probing each candidate expression against finite, signed
+// zero, NaN, +Inf and -Inf inputs rather than by reasoning about it.
+//
+// # Implementation note
+//
+// Each scan keeps one NaN flag *per accumulator* rather than a single shared flag.
+// A shared flag would be written and read every iteration, making it a
+// loop-carried dependency of its own and defeating the purpose of having
+// independent accumulator chains. The flags are combined once, after the loop.

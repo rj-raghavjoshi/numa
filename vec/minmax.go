@@ -6,7 +6,7 @@ import "math"
 //
 // It returns (+Inf, -Inf) for an empty or nil slice. Callers that need both values
 // should prefer MinMax over calling [Min] and [Max] separately, because it reads
-// the input once instead of twice — but see the caveat below.
+// the input once instead of twice.
 //
 // MinMax returns (NaN, NaN) if any element of xs is NaN. See [NaN policy] for the
 // reasoning.
@@ -17,24 +17,13 @@ import "math"
 // maximum. Keeping the min and max chains distinct lets the compare circuitry stay
 // busy, since the two directions are independent.
 //
-// Reading the input once instead of twice makes MinMax 1.42x faster than
-// `Min(xs) + Max(xs)`.
-//
-// # Caveat: the NaN check may erase that advantage
-//
-// MinMax also performs the extra NaN pass, so the 1.42x figure (which predates the
-// check) is optimistic for the exported function. The comparison against two
-// separate calls remains valid because both sides pay the same cost; the absolute
-// numbers do not. Re-benchmark before relying on them.
+// The NaN check is fused into the same loop, so the single-pass advantage over
+// `Min(xs)` plus `Max(xs)` is preserved rather than being spent on an extra pass.
 //
 // [NaN policy]: #nan-policy
 func MinMax(xs []float64) (lo, hi float64) {
 	if len(xs) == 0 {
 		return math.Inf(1), math.Inf(-1)
 	}
-	lo, hi = minMaxArch(xs)
-	if hasNaN(xs) {
-		return math.NaN(), math.NaN()
-	}
-	return lo, hi
+	return minMaxArch(xs)
 }

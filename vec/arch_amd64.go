@@ -2,6 +2,8 @@
 
 package vec
 
+import "math"
+
 // ---------------------------------------------------------------------------
 // x86-64 tuning parameters.
 //
@@ -92,14 +94,24 @@ func sumSqArch(xs []float64) float64 {
 	return (s0 + s1) + (s2 + s3)
 }
 
-// minArch is the x86-64 tuned minimum scan.
+// minArch is the x86-64 tuned minimum scan, including NaN detection.
 //
 // Four accumulators. Unlike summation there is no pairwise trick available,
 // because min has no associative "combine two at once" form that shortens the
 // chain -- a compare always needs the running value. Splitting the input into
 // four independent partial scans is therefore the entire optimization.
+//
+// The NaN check is fused into the loop rather than a separate pass. Measured on
+// arm64, fusion is nearly free (9.43 GB/s vs 9.51 GB/s without any check) while a
+// second pass halves throughput (4.68 GB/s). The NaN test is an integer-flag
+// accumulation, so it uses different ports than the float compare and does not
+// lengthen the latency-bound chain. See arch_arm64.go's minArch for why the
+// arithmetic alternative does not work.
 func minArch(xs []float64) float64 {
-	m0, m1, m2, m3 := scanMin4(xs)
+	m0, m1, m2, m3, nan := scanMin4(xs)
+	if nan {
+		return math.NaN()
+	}
 	lo01, lo23 := m0, m2
 	if m1 < lo01 {
 		lo01 = m1
@@ -113,9 +125,12 @@ func minArch(xs []float64) float64 {
 	return lo01
 }
 
-// maxArch is the x86-64 tuned maximum scan.
+// maxArch is the x86-64 tuned maximum scan, including NaN detection.
 func maxArch(xs []float64) float64 {
-	m0, m1, m2, m3 := scanMax4(xs)
+	m0, m1, m2, m3, nan := scanMax4(xs)
+	if nan {
+		return math.NaN()
+	}
 	hi01, hi23 := m0, m2
 	if m1 > hi01 {
 		hi01 = m1
@@ -129,23 +144,37 @@ func maxArch(xs []float64) float64 {
 	return hi01
 }
 
-// minMaxArch is the x86-64 tuned combined min/max scan.
+// minMaxArch is the x86-64 tuned combined min/max scan, including NaN detection.
 //
 // Eight accumulators: four scanning for the minimum and four for the maximum.
 // That is a lot of live registers, which is exactly why the min/max pair is
 // worth measuring rather than assuming.
 func minMaxArch(xs []float64) (lo, hi float64) {
-	return scanMinMax4(xs)
+	lo, hi, nan := scanMinMax4(xs)
+	if nan {
+		return math.NaN(), math.NaN()
+	}
+	return lo, hi
 }
 
-// scanMin4 scans xs with four independent minimum chains.
-func scanMin4(xs []float64) (m0, m1, m2, m3 float64) {
+// scanMin4 scans xs with four independent minimum chains, plus a fused NaN check.
+//
+// Four separate NaN flags rather than one shared flag, so the chains stay
+// independent and the flag does not become a loop-carried dependency.
+func scanMin4(xs []float64) (m0, m1, m2, m3 float64, nan bool) {
 	m0, m1, m2, m3 = xs[0], xs[0], xs[0], xs[0]
+	var nan0, nan1, nan2, nan3 bool
 	i := 0
 	limit := len(xs) - 3
 
 	for i < limit {
 		a, b, c, d := xs[i], xs[i+1], xs[i+2], xs[i+3]
+
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		nan2 = nan2 || c != c
+		nan3 = nan3 || d != d
+
 		if a < m0 {
 			m0 = a
 		}
@@ -162,22 +191,31 @@ func scanMin4(xs []float64) (m0, m1, m2, m3 float64) {
 	}
 
 	for ; i < len(xs); i++ {
-		if v := xs[i]; v < m0 {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v < m0 {
 			m0 = v
 		}
 	}
 
-	return m0, m1, m2, m3
+	return m0, m1, m2, m3, nan0 || nan1 || nan2 || nan3
 }
 
 // scanMax4 is scanMin4 with the comparison reversed.
-func scanMax4(xs []float64) (m0, m1, m2, m3 float64) {
+func scanMax4(xs []float64) (m0, m1, m2, m3 float64, nan bool) {
 	m0, m1, m2, m3 = xs[0], xs[0], xs[0], xs[0]
+	var nan0, nan1, nan2, nan3 bool
 	i := 0
 	limit := len(xs) - 3
 
 	for i < limit {
 		a, b, c, d := xs[i], xs[i+1], xs[i+2], xs[i+3]
+
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		nan2 = nan2 || c != c
+		nan3 = nan3 || d != d
+
 		if a > m0 {
 			m0 = a
 		}
@@ -194,23 +232,32 @@ func scanMax4(xs []float64) (m0, m1, m2, m3 float64) {
 	}
 
 	for ; i < len(xs); i++ {
-		if v := xs[i]; v > m0 {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v > m0 {
 			m0 = v
 		}
 	}
 
-	return m0, m1, m2, m3
+	return m0, m1, m2, m3, nan0 || nan1 || nan2 || nan3
 }
 
-// scanMinMax4 is the x86-64 combined scan: four min chains, four max chains.
-func scanMinMax4(xs []float64) (lo, hi float64) {
+// scanMinMax4 is the x86-64 combined scan: four min chains, four max chains, and
+// a fused NaN check.
+func scanMinMax4(xs []float64) (lo, hi float64, nan bool) {
 	lo0, lo1, lo2, lo3 := xs[0], xs[0], xs[0], xs[0]
 	hi0, hi1, hi2, hi3 := xs[0], xs[0], xs[0], xs[0]
+	var nan0, nan1, nan2, nan3 bool
 	i := 0
 	limit := len(xs) - 3
 
 	for i < limit {
 		a, b, c, d := xs[i], xs[i+1], xs[i+2], xs[i+3]
+
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		nan2 = nan2 || c != c
+		nan3 = nan3 || d != d
 
 		if a < lo0 {
 			lo0 = a
@@ -241,6 +288,7 @@ func scanMinMax4(xs []float64) (lo, hi float64) {
 
 	for ; i < len(xs); i++ {
 		v := xs[i]
+		nan0 = nan0 || v != v
 		if v < lo0 {
 			lo0 = v
 		}
@@ -271,7 +319,7 @@ func scanMinMax4(xs []float64) (lo, hi float64) {
 		hi01 = hi23
 	}
 
-	return lo01, hi01
+	return lo01, hi01, nan0 || nan1 || nan2 || nan3
 }
 
 // addArch is the x86-64 tuned elementwise addition.

@@ -172,25 +172,38 @@ func TestScansPropagateNaNAtBoundaries(t *testing.T) {
 	}
 }
 
-func TestHasNaN(t *testing.T) {
+// TestScansSmallInputsNaNBehaviour exercises the fused NaN check on the small and
+// degenerate inputs that the unrolled loops handle via their tail paths.
+//
+// This replaced a unit test of the old standalone hasNaN helper. The check now
+// lives inside each scan loop, so the observable contract is worth testing at the
+// scan level rather than in isolation.
+func TestScansSmallInputsNaNBehaviour(t *testing.T) {
 	cases := []struct {
 		name string
 		xs   []float64
-		want bool
+		nan  bool
 	}{
-		{"empty", nil, false},
 		{"no nan", []float64{1, 2, 3}, false},
-		{"inf is not nan", []float64{math.Inf(1), math.Inf(-1)}, false},
+		{"infinities are not nan", []float64{math.Inf(1), math.Inf(-1)}, false},
 		{"nan first", []float64{math.NaN(), 1, 2}, true},
 		{"nan last", []float64{1, 2, math.NaN()}, true},
 		{"nan only", []float64{math.NaN()}, true},
 		{"many nan", []float64{math.NaN(), math.NaN()}, true},
+		{"mixed inf and nan", []float64{math.Inf(1), math.NaN(), math.Inf(-1)}, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hasNaN(tc.xs); got != tc.want {
-				t.Errorf("hasNaN = %v, want %v", got, tc.want)
+			if got := Min(tc.xs); math.IsNaN(got) != tc.nan {
+				t.Errorf("Min = %v, want NaN=%v", got, tc.nan)
+			}
+			if got := Max(tc.xs); math.IsNaN(got) != tc.nan {
+				t.Errorf("Max = %v, want NaN=%v", got, tc.nan)
+			}
+			lo, hi := MinMax(tc.xs)
+			if math.IsNaN(lo) != tc.nan || math.IsNaN(hi) != tc.nan {
+				t.Errorf("MinMax = (%v,%v), want NaN=%v", lo, hi, tc.nan)
 			}
 		})
 	}

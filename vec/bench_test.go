@@ -2,6 +2,7 @@ package vec
 
 import (
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -249,15 +250,82 @@ func BenchmarkMax(b *testing.B) {
 	}
 }
 
-// BenchmarkMinArchNoNaN measures the scan loop without the NaN check, so the cost
-// of the documented NaN policy is a measured quantity rather than a guess.
-func BenchmarkMinArchNoNaN(b *testing.B) {
+// BenchmarkMinPureScan measures the scan loop with no NaN handling at all, as the
+// upper bound. Comparing it against BenchmarkMin isolates the cost of the fused NaN
+// check: measured, the gap is about 1%, versus the 2x that a separate pass cost.
+//
+// This is the benchmark that justifies the fusion decision in nan.go. If a future
+// change makes the gap large again, the fusion has been undone.
+func BenchmarkMinPureScan(b *testing.B) {
 	for _, n := range benchSizes {
 		xs := benchData(n)
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
 			b.SetBytes(int64(8 * n))
 			for i := 0; i < b.N; i++ {
-				sink = minArch(xs)
+				sink = pureScanMin(xs)
+			}
+		})
+	}
+}
+
+// naiveMinWithNaN is the plain one-accumulator scan that also honours the NaN
+// policy, so the comparison against Min is apples-to-apples. The older
+// BenchmarkNaiveMin did not check for NaN, which made the tuned version look
+// better than it was when a separate pass was in play.
+func naiveMinWithNaN(xs []float64) float64 {
+	m := xs[0]
+	nan := false
+	for _, v := range xs {
+		if v != v {
+			nan = true
+		}
+		if v < m {
+			m = v
+		}
+	}
+	if nan {
+		return math.NaN()
+	}
+	return m
+}
+
+// pureScanMin is the two-accumulator scan with the NaN flag removed, for isolating
+// the check's cost.
+func pureScanMin(xs []float64) float64 {
+	n := len(xs)
+	m0, m1 := xs[0], xs[0]
+	i := 0
+	limit := n - 1
+
+	for i < limit {
+		v0, v1 := xs[i], xs[i+1]
+		if v0 < m0 {
+			m0 = v0
+		}
+		if v1 < m1 {
+			m1 = v1
+		}
+		i += 2
+	}
+	for ; i < n; i++ {
+		if v := xs[i]; v < m0 {
+			m0 = v
+		}
+	}
+	if m1 < m0 {
+		return m1
+	}
+	return m0
+}
+
+// BenchmarkNaiveMinWithNaN is the correct baseline for BenchmarkMin.
+func BenchmarkNaiveMinWithNaN(b *testing.B) {
+	for _, n := range benchSizes {
+		xs := benchData(n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(8 * n))
+			for i := 0; i < b.N; i++ {
+				sink = naiveMinWithNaN(xs)
 			}
 		})
 	}

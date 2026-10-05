@@ -469,3 +469,247 @@ func absArch(dst, xs []float64) []float64 {
 	}
 	return dst
 }
+
+// ---------------------------------------------------------------------------
+// Arg reductions, x86-64 tuning.
+//
+// Four independent partial scans, mirroring scanMin4. See arch_arm64.go's argMinArch
+// for why the combine step must break a tie by index rather than by value alone --
+// the reasoning is architecture-independent, only the chain count differs.
+// ---------------------------------------------------------------------------
+
+func argMinArch(xs []float64) int {
+	m0, m1, m2, m3 := xs[0], xs[0], xs[0], xs[0]
+	i0, i1, i2, i3 := 0, 0, 0, 0
+	var nan0, nan1, nan2, nan3 bool
+	i := 0
+	limit := len(xs) - 3
+
+	for i < limit {
+		a, b, c, d := xs[i], xs[i+1], xs[i+2], xs[i+3]
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		nan2 = nan2 || c != c
+		nan3 = nan3 || d != d
+		if a < m0 {
+			m0, i0 = a, i
+		}
+		if b < m1 {
+			m1, i1 = b, i+1
+		}
+		if c < m2 {
+			m2, i2 = c, i+2
+		}
+		if d < m3 {
+			m3, i3 = d, i+3
+		}
+		i += 4
+	}
+	for ; i < len(xs); i++ {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v < m0 {
+			m0, i0 = v, i
+		}
+	}
+
+	if nan0 || nan1 || nan2 || nan3 {
+		return -1
+	}
+	best, bi := m0, i0
+	if m1 < best || (m1 == best && i1 < bi) {
+		best, bi = m1, i1
+	}
+	if m2 < best || (m2 == best && i2 < bi) {
+		best, bi = m2, i2
+	}
+	if m3 < best || (m3 == best && i3 < bi) {
+		best, bi = m3, i3
+	}
+	return bi
+}
+
+func argMaxArch(xs []float64) int {
+	m0, m1, m2, m3 := xs[0], xs[0], xs[0], xs[0]
+	i0, i1, i2, i3 := 0, 0, 0, 0
+	var nan0, nan1, nan2, nan3 bool
+	i := 0
+	limit := len(xs) - 3
+
+	for i < limit {
+		a, b, c, d := xs[i], xs[i+1], xs[i+2], xs[i+3]
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		nan2 = nan2 || c != c
+		nan3 = nan3 || d != d
+		if a > m0 {
+			m0, i0 = a, i
+		}
+		if b > m1 {
+			m1, i1 = b, i+1
+		}
+		if c > m2 {
+			m2, i2 = c, i+2
+		}
+		if d > m3 {
+			m3, i3 = d, i+3
+		}
+		i += 4
+	}
+	for ; i < len(xs); i++ {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v > m0 {
+			m0, i0 = v, i
+		}
+	}
+
+	if nan0 || nan1 || nan2 || nan3 {
+		return -1
+	}
+	best, bi := m0, i0
+	if m1 > best || (m1 == best && i1 < bi) {
+		best, bi = m1, i1
+	}
+	if m2 > best || (m2 == best && i2 < bi) {
+		best, bi = m2, i2
+	}
+	if m3 > best || (m3 == best && i3 < bi) {
+		best, bi = m3, i3
+	}
+	return bi
+}
+
+func argMinMaxArch(xs []float64) (int, int) {
+	lo0, lo1, lo2, lo3 := xs[0], xs[0], xs[0], xs[0]
+	hi0, hi1, hi2, hi3 := xs[0], xs[0], xs[0], xs[0]
+	li0, li1, li2, li3 := 0, 0, 0, 0
+	hi0i, hi1i, hi2i, hi3i := 0, 0, 0, 0
+	var nan0, nan1, nan2, nan3 bool
+	i := 0
+	limit := len(xs) - 3
+
+	for i < limit {
+		a, b, c, d := xs[i], xs[i+1], xs[i+2], xs[i+3]
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		nan2 = nan2 || c != c
+		nan3 = nan3 || d != d
+		if a < lo0 {
+			lo0, li0 = a, i
+		}
+		if a > hi0 {
+			hi0, hi0i = a, i
+		}
+		if b < lo1 {
+			lo1, li1 = b, i+1
+		}
+		if b > hi1 {
+			hi1, hi1i = b, i+1
+		}
+		if c < lo2 {
+			lo2, li2 = c, i+2
+		}
+		if c > hi2 {
+			hi2, hi2i = c, i+2
+		}
+		if d < lo3 {
+			lo3, li3 = d, i+3
+		}
+		if d > hi3 {
+			hi3, hi3i = d, i+3
+		}
+		i += 4
+	}
+	for ; i < len(xs); i++ {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v < lo0 {
+			lo0, li0 = v, i
+		}
+		if v > hi0 {
+			hi0, hi0i = v, i
+		}
+	}
+
+	if nan0 || nan1 || nan2 || nan3 {
+		return -1, -1
+	}
+
+	// Combine by value first, then by index for an exact tie. The running best
+	// value must be carried, not compared against lo0/hi0, or a later chain with a
+	// value between lo0 and the true best would be selected incorrectly.
+	bestLo, loi := lo0, li0
+	if lo1 < bestLo || (lo1 == bestLo && li1 < loi) {
+		bestLo, loi = lo1, li1
+	}
+	if lo2 < bestLo || (lo2 == bestLo && li2 < loi) {
+		bestLo, loi = lo2, li2
+	}
+	if lo3 < bestLo || (lo3 == bestLo && li3 < loi) {
+		bestLo, loi = lo3, li3
+	}
+
+	bestHi, hii := hi0, hi0i
+	if hi1 > bestHi || (hi1 == bestHi && hi1i < hii) {
+		bestHi, hii = hi1, hi1i
+	}
+	if hi2 > bestHi || (hi2 == bestHi && hi2i < hii) {
+		bestHi, hii = hi2, hi2i
+	}
+	if hi3 > bestHi || (hi3 == bestHi && hi3i < hii) {
+		bestHi, hii = hi3, hi3i
+	}
+	return loi, hii
+}
+
+// ---------------------------------------------------------------------------
+// Statistics helpers, x86-64 tuning.
+//
+// Four-chain versions of the deviation reductions described in arch_arm64.go.
+// x86-64 has the register headroom for four independent multiply-accumulate chains,
+// which matters more here than for a plain sum because both the subtraction's
+// multiply and the accumulation carry latency.
+// ---------------------------------------------------------------------------
+
+func dotDevArch(xs, ys []float64, cx, cy float64) float64 {
+	n := min(len(xs), len(ys))
+	var s0, s1, s2, s3 float64
+	i := 0
+	limit := n - 7
+
+	for i < limit {
+		s0 += (xs[i]-cx)*(ys[i]-cy) + (xs[i+1]-cx)*(ys[i+1]-cy)
+		s1 += (xs[i+2]-cx)*(ys[i+2]-cy) + (xs[i+3]-cx)*(ys[i+3]-cy)
+		s2 += (xs[i+4]-cx)*(ys[i+4]-cy) + (xs[i+5]-cx)*(ys[i+5]-cy)
+		s3 += (xs[i+6]-cx)*(ys[i+6]-cy) + (xs[i+7]-cx)*(ys[i+7]-cy)
+		i += 8
+	}
+
+	for ; i < n; i++ {
+		s0 += (xs[i] - cx) * (ys[i] - cy)
+	}
+
+	return (s0 + s1) + (s2 + s3)
+}
+
+func sumAbsDevArch(xs []float64, center float64) float64 {
+	n := len(xs)
+	var s0, s1, s2, s3 float64
+	i := 0
+	limit := n - 7
+
+	for i < limit {
+		s0 += abs(xs[i]-center) + abs(xs[i+1]-center)
+		s1 += abs(xs[i+2]-center) + abs(xs[i+3]-center)
+		s2 += abs(xs[i+4]-center) + abs(xs[i+5]-center)
+		s3 += abs(xs[i+6]-center) + abs(xs[i+7]-center)
+		i += 8
+	}
+
+	for ; i < n; i++ {
+		s0 += abs(xs[i] - center)
+	}
+
+	return (s0 + s1) + (s2 + s3)
+}

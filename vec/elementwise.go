@@ -37,3 +37,13 @@ func checkSameLen1(op string, dst, xs []float64) {
 		panic("vec: " + op + " length mismatch")
 	}
 }
+
+// checkSameLen4 panics unless dst and the three inputs all have the same length.
+//
+// The four-slice maps (MulAdd) need this; the two- and three-slice helpers above
+// cover everything else.
+func checkSameLen4(op string, dst, a, b, c []float64) {
+	if len(dst) != len(a) || len(dst) != len(b) || len(dst) != len(c) {
+		panic("vec: " + op + " length mismatch")
+	}
+}

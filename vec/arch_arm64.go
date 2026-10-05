@@ -391,3 +391,226 @@ func absArch(dst, xs []float64) []float64 {
 	}
 	return dst
 }
+
+// ---------------------------------------------------------------------------
+// Arg reductions, ARM64 tuning.
+//
+// Two independent partial scans, two elements per iteration -- the same structure
+// as scanMin2, for the same reason: the compare chain is the bottleneck and the
+// only parallelism available is splitting the input.
+//
+// The NaN flag is per-chain so it does not become a shared loop-carried
+// dependency, exactly as in the Min/Max scans.
+//
+// # Tie handling across chains
+//
+// Values alone are not enough to reconstruct the answer. Each chain finds its own
+// extreme, and two chains can hold the *same* extreme value at different indices.
+// The combine step therefore breaks an equality by index, returning the smaller.
+// A combine that compared only values would return the wrong index for a tie that
+// straddles the chain boundary; TestArgReductionsTiesResolveFirst covers it.
+//
+// Chain 1's index starts at 0 rather than 1, which is safe for the same reason: if
+// chain 1's value still equals the seed xs[0], then index 0 is genuinely the first
+// occurrence of that value and the tie-break keeps it.
+// ---------------------------------------------------------------------------
+
+func argMinArch(xs []float64) int {
+	m0, m1 := xs[0], xs[0]
+	i0, i1 := 0, 0
+	var nan0, nan1 bool
+	i := 0
+	limit := len(xs) - 1
+
+	for i < limit {
+		v0, v1 := xs[i], xs[i+1]
+		nan0 = nan0 || v0 != v0
+		nan1 = nan1 || v1 != v1
+		if v0 < m0 {
+			m0, i0 = v0, i
+		}
+		if v1 < m1 {
+			m1, i1 = v1, i+1
+		}
+		i += 2
+	}
+	for ; i < len(xs); i++ {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v < m0 {
+			m0, i0 = v, i
+		}
+	}
+
+	if nan0 || nan1 {
+		return -1
+	}
+	switch {
+	case m1 < m0:
+		return i1
+	case m0 < m1:
+		return i0
+	case i1 < i0:
+		return i1
+	default:
+		return i0
+	}
+}
+
+func argMaxArch(xs []float64) int {
+	m0, m1 := xs[0], xs[0]
+	i0, i1 := 0, 0
+	var nan0, nan1 bool
+	i := 0
+	limit := len(xs) - 1
+
+	for i < limit {
+		v0, v1 := xs[i], xs[i+1]
+		nan0 = nan0 || v0 != v0
+		nan1 = nan1 || v1 != v1
+		if v0 > m0 {
+			m0, i0 = v0, i
+		}
+		if v1 > m1 {
+			m1, i1 = v1, i+1
+		}
+		i += 2
+	}
+	for ; i < len(xs); i++ {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v > m0 {
+			m0, i0 = v, i
+		}
+	}
+
+	if nan0 || nan1 {
+		return -1
+	}
+	switch {
+	case m1 > m0:
+		return i1
+	case m0 > m1:
+		return i0
+	case i1 < i0:
+		return i1
+	default:
+		return i0
+	}
+}
+
+func argMinMaxArch(xs []float64) (int, int) {
+	lo0, lo1 := xs[0], xs[0]
+	hi0, hi1 := xs[0], xs[0]
+	li0, li1 := 0, 0
+	hi_i0, hi_i1 := 0, 0
+	var nan0, nan1 bool
+	i := 0
+	limit := len(xs) - 1
+
+	for i < limit {
+		a, b := xs[i], xs[i+1]
+		nan0 = nan0 || a != a
+		nan1 = nan1 || b != b
+		if a < lo0 {
+			lo0, li0 = a, i
+		}
+		if a > hi0 {
+			hi0, hi_i0 = a, i
+		}
+		if b < lo1 {
+			lo1, li1 = b, i+1
+		}
+		if b > hi1 {
+			hi1, hi_i1 = b, i+1
+		}
+		i += 2
+	}
+	for ; i < len(xs); i++ {
+		v := xs[i]
+		nan0 = nan0 || v != v
+		if v < lo0 {
+			lo0, li0 = v, i
+		}
+		if v > hi0 {
+			hi0, hi_i0 = v, i
+		}
+	}
+
+	if nan0 || nan1 {
+		return -1, -1
+	}
+
+	loi := li0
+	if lo1 < lo0 || (lo1 == lo0 && li1 < loi) {
+		loi = li1
+	}
+	hii := hi_i0
+	if hi1 > hi0 || (hi1 == hi0 && hi_i1 < hii) {
+		hii = hi_i1
+	}
+	return loi, hii
+}
+
+// ---------------------------------------------------------------------------
+// Statistics helpers, ARM64 tuning.
+//
+// These are the inner sums of the two-pass statistics in stats.go. They are
+// reductions over deviations rather than over the raw values, which is what makes
+// the statistics numerically stable: computing a sum of squares of the raw values
+// and subtracting n*mean^2 loses most of the significant digits when the mean
+// dwarfs the spread, which is the normal case for a price series.
+//
+// # Why these take a center rather than materialising deviations
+//
+// The obvious alternative is to build a scratch slice of (x - center) and reuse
+// [sumSqArch] and [dotArch]. That allocates per call and writes a full pass of
+// memory that is read back immediately, so it costs a third memory traversal for no
+// accuracy benefit. Subtracting the center inside the accumulator loop keeps the two
+// traversals the algorithms already need and nothing more.
+//
+// Both use the two-chain ARM64 shape, for the usual reason: the multiply and the
+// add each carry latency, and two independent chains hide one behind the other.
+// ---------------------------------------------------------------------------
+
+// dotDevArch returns the sum of (xs[i]-cx)*(ys[i]-cy) over min(len(xs), len(ys))
+// elements. When called with ys == xs and cy == cx it computes the sum of squared
+// deviations, which is the second pass of a variance.
+func dotDevArch(xs, ys []float64, cx, cy float64) float64 {
+	n := min(len(xs), len(ys))
+	var s0, s1 float64
+	i := 0
+	limit := n - 3
+
+	for i < limit {
+		s0 += (xs[i]-cx)*(ys[i]-cy) + (xs[i+1]-cx)*(ys[i+1]-cy)
+		s1 += (xs[i+2]-cx)*(ys[i+2]-cy) + (xs[i+3]-cx)*(ys[i+3]-cy)
+		i += 4
+	}
+
+	for ; i < n; i++ {
+		s0 += (xs[i] - cx) * (ys[i] - cy)
+	}
+
+	return s0 + s1
+}
+
+// sumAbsDevArch returns the sum of |xs[i]-center| over xs.
+func sumAbsDevArch(xs []float64, center float64) float64 {
+	n := len(xs)
+	var s0, s1 float64
+	i := 0
+	limit := n - 3
+
+	for i < limit {
+		s0 += abs(xs[i]-center) + abs(xs[i+1]-center)
+		s1 += abs(xs[i+2]-center) + abs(xs[i+3]-center)
+		i += 4
+	}
+
+	for ; i < n; i++ {
+		s0 += abs(xs[i] - center)
+	}
+
+	return s0 + s1
+}

@@ -138,3 +138,94 @@ func absArch(dst, xs []float64) []float64 {
 	}
 	return dst
 }
+
+// ---------------------------------------------------------------------------
+// Arg reductions.
+//
+// The generic reference is a single running extreme with one NaN flag. It is
+// deliberately not parallelised: this file is the baseline the tuned scans are
+// measured against, so making it clever would destroy its only purpose.
+//
+// The `m != m` term in the final test catches a NaN sitting at index 0. The loop
+// starts at index 1, so a leading NaN never passes through the in-loop flag, and
+// because every ordering comparison against NaN is false it is never replaced.
+// ---------------------------------------------------------------------------
+
+func argMinArch(xs []float64) int {
+	m := xs[0]
+	idx := 0
+	nan := false
+	for i := 1; i < len(xs); i++ {
+		v := xs[i]
+		nan = nan || v != v
+		if v < m {
+			m, idx = v, i
+		}
+	}
+	if nan || m != m {
+		return -1
+	}
+	return idx
+}
+
+func argMaxArch(xs []float64) int {
+	m := xs[0]
+	idx := 0
+	nan := false
+	for i := 1; i < len(xs); i++ {
+		v := xs[i]
+		nan = nan || v != v
+		if v > m {
+			m, idx = v, i
+		}
+	}
+	if nan || m != m {
+		return -1
+	}
+	return idx
+}
+
+func argMinMaxArch(xs []float64) (int, int) {
+	lo, hi := xs[0], xs[0]
+	loi, hii := 0, 0
+	nan := xs[0] != xs[0]
+	for i := 1; i < len(xs); i++ {
+		v := xs[i]
+		nan = nan || v != v
+		if v < lo {
+			lo, loi = v, i
+		}
+		if v > hi {
+			hi, hii = v, i
+		}
+	}
+	if nan {
+		return -1, -1
+	}
+	return loi, hii
+}
+
+// ---------------------------------------------------------------------------
+// Statistics helpers.
+//
+// The portable reference for the deviation reductions in stats.go: a single
+// accumulator, no independent chains. Kept plain on purpose -- it is the baseline
+// the tuned versions are measured against.
+// ---------------------------------------------------------------------------
+
+func dotDevArch(xs, ys []float64, cx, cy float64) float64 {
+	n := min(len(xs), len(ys))
+	var total float64
+	for i := 0; i < n; i++ {
+		total += (xs[i] - cx) * (ys[i] - cy)
+	}
+	return total
+}
+
+func sumAbsDevArch(xs []float64, center float64) float64 {
+	var total float64
+	for _, v := range xs {
+		total += abs(v - center)
+	}
+	return total
+}

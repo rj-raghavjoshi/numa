@@ -163,12 +163,40 @@ production:
    accuracy more than throughput. The test infrastructure already exists —
    `exactSum` in `vec/helpers_test.go` is a 200-bit reference.
 
-2. **Fused multiply-add.** `Dot` and `SumSq` currently compile to a separate
-   multiply and add. With hardware FMA this could be one instruction with one
-   rounding, which is both faster and *more accurate*. Since §4 established that
-   the reductions are arithmetic-bound rather than bandwidth-bound, FMA is now a
-   well-motivated optimization rather than a speculative one. It changes results
-   again, so it interacts with §6.2 and §7.3.
+2. **Fused multiply-add — resolved, and the earlier claim was wrong.** An earlier
+   revision of this section asserted that "`Dot` and `SumSq` currently compile to a
+   separate multiply and add", and treated FMA as future work worth ~1.49×. That
+   is false on arm64. It was settled by disassembling the package rather than by
+   reading it:
+
+   ```sh
+   go test -c -o /tmp/vec.test ./vec/
+   go tool objdump -s 'vec\.dotArch$' /tmp/vec.test | grep FMADD   # 3 matches
+   ```
+
+   `dotArch` contains `FMADD D`. The Go compiler contracts `a + x*y` into a
+   hardware fused multiply-add when the target has one — `useFMA` in
+   `cmd/compile/internal/ssa/func.go` returns true unless the `GOFMAHASH` debug
+   flag is set — so the tuned `Dot` was already using FMA. The "~1.49× available"
+   figure in §4 must be read as headroom *after* FMA, not before it.
+
+   `math.FMA` is likewise a real compiler intrinsic: it lowers to `FMADD` on
+   arm64, and on amd64 either to `VFMADD` when `GOAMD64 >= v3` or behind a
+   runtime `X86HasFMA` check, falling through to the correct pure-Go routine that
+   ships with the standard library otherwise. It is not the slow software path
+   that an earlier revision of `vec/math.go` described. `vec.FMA` now exposes it
+   for callers who need a guaranteed single rounding.
+
+   This was confirmed by a test as well as by disassembly:
+   `TestMulAddContractionIsObservable` logs which of the two permitted roundings
+   this platform produced for a plain `a*b + c`, and on arm64 it reports the fused
+   one. `TestFMAIsSingleRounding` pins the fused result independently of
+   contraction.
+
+   **Consequence for the plan:** FMA is no longer "the next optimization" — it is
+   already present in the reductions. What remains open is SIMD, and the fact
+   that contraction changes results across architectures is further support for
+   the negative answer to §6.2 (reproducibility).
 
 3. **Reproducible summation via assembly.** If cross-architecture
    bit-reproducibility is required, the only way to keep the tuned loops is for each
@@ -193,29 +221,32 @@ production:
 ```mermaid
 graph LR
     A["1. Fix the NaN cost (§3)"] --> B["2. Is it bandwidth-bound? (§4)"]
-    B --> C["3. FMA for Dot/SumSq (§7.2)<br/>~1.49x headroom, or not"]
+    B --> C["3. FMA for Dot/SumSq (§7.2)<br/>already active, not missing"]
     C --> D["4. Decide reproducibility (§6.2)"]
-    D --> E["5. SIMD (§7.5)<br/>only if FMA leaves room"]
+    D --> E["5. SIMD (§7.5)<br/>the headroom that is left"]
     E --> F["6. Re-benchmark on<br/>native x86-64"]
     style A fill:#d4f4d4
     style B fill:#d4f4d4
-    style C fill:#ffe9b3
+    style C fill:#d4f4d4
     style F fill:#ffcccc
 ```
 
-**Done:** §3 and §4. Both were resolved by measuring rather than reasoning, and both
-overturned an assumption that had been stated as fact in this repository — the NaN
-check turned out to be nearly free when fused, and the reductions turned out not to
-be bandwidth-bound at all.
+**Done:** §3, §4 and §7.2. Each was resolved by measuring rather than reasoning, and
+each overturned an assumption that had been stated as fact in this repository: the
+NaN check turned out to be nearly free when fused, the reductions turned out not to
+be bandwidth-bound at all, and FMA turned out to be already active rather than
+future work. The disassembly was the decisive evidence for the third — see §7.2.
 
-**Next:** FMA (§7.2). It now has a measured motivation rather than a speculative
-one: the bottleneck is arithmetic latency, and FMA removes an operation per
-element while also improving accuracy by rounding once instead of twice.
+**Next:** SIMD (§7.5). It is now the only remaining arithmetic optimization: the
+overtaken FMA step means the "~1.49× headroom" figure in §4 is what is left after
+contraction, not before it, and reducing instructions per element is still the right
+target.
 
 **Still blocked on hardware:** §8.6. The x86-64 figures in this repository come
 from Rosetta 2, so any decision that depends on x86-64 magnitudes needs a native
 machine to confirm.
 
-**Still a decision, not work:** §6.2 (reproducibility). It gates what the
-arithmetic is even allowed to do, so it is worth settling before adding more
-operations rather than after.
+**Still a decision, not work:** §6.2 (reproducibility). Auto-contraction makes the
+answer harder to reverse the longer it stays undecided, because results already
+differ across architectures and the compiler is choosing roundings on the user's
+behalf.

@@ -301,6 +301,7 @@ func TestVolume2EmptyAndPanics(t *testing.T) {
 		{"CKS length", func() { ChandeKrollStop(short, short, long, 10, 1, 9) }},
 		{"52w period", func() { FiftyTwoWeekHighLow(high, low, 0) }},
 		{"52w length", func() { FiftyTwoWeekHighLow(short, long, 10) }},
+		{"RelativeVolume period", func() { RelativeVolume(long, 0) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
@@ -310,5 +311,29 @@ func TestVolume2EmptyAndPanics(t *testing.T) {
 			}()
 			tc.fn()
 		})
+	}
+}
+
+func TestRelativeVolume(t *testing.T) {
+	if got := RelativeVolume(nil, 5); got != nil {
+		t.Errorf("RelativeVolume(nil) = %v, want nil", got)
+	}
+
+	vol := []float64{10, 20, 30, 60, 0, 0, 0}
+	got := RelativeVolume(vol, 3)
+	// i=0,1 -> NaN; i=2 -> avg=20, 30/20=1.5; i=3 -> avg=110/3, 60/(110/3)=180/110.
+	if !math.IsNaN(got[0]) || !math.IsNaN(got[1]) {
+		t.Errorf("warm-up indices should be NaN, got %v", got[:2])
+	}
+	if math.Abs(got[2]-1.5) > 1e-12 {
+		t.Errorf("got[2] = %v, want 1.5", got[2])
+	}
+	want3 := 180.0 / 110.0
+	if math.Abs(got[3]-want3) > 1e-12 {
+		t.Errorf("got[3] = %v, want %v", got[3], want3)
+	}
+	// i=6 -> all zero -> avg == 0 -> 0 rather than NaN/Inf.
+	if got[6] != 0 {
+		t.Errorf("got[6] with zero SMA = %v, want 0", got[6])
 	}
 }

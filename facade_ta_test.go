@@ -195,4 +195,17 @@ func TestTaForwardersAgreeWithVecWhereTheyOverlap(t *testing.T) {
 			t.Fatalf("SMA[%d] = %v, vec.Mean of the window = %v", i, sma[i], want)
 		}
 	}
+
+	if RelativeVolume(nil, 5) != nil {
+		t.Error("empty RelativeVolume should be nil")
+	}
+	_, _, _, _, vol := testOHLCV()
+	rvGot := RelativeVolume(vol, n)
+	volSMA := SMA(vol, n)
+	for i := n - 1; i < len(vol); i++ {
+		want := vol[i] / volSMA[i]
+		if math.Abs(rvGot[i]-want) > 1e-9 {
+			t.Fatalf("RelativeVolume[%d] = %v, want %v", i, rvGot[i], want)
+		}
+	}
 }

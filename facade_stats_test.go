@@ -121,10 +121,24 @@ func TestStatsNaNPolicySurvivesFacade(t *testing.T) {
 		{"Kurtosis(nil)", func() float64 { return Kurtosis(nil) }},
 		{"GeoMean(nil)", func() float64 { return GeoMean(nil) }},
 		{"Variance with NaN", func() float64 { return Variance([]float64{1, math.NaN()}) }},
+		{"DownsideDeviation(nil)", func() float64 { return DownsideDeviation(nil, 0) }},
+		{"Beta(constant ys)", func() float64 { return Beta([]float64{1, 2, 3}, []float64{4, 4, 4}) }},
 	}
 	for _, tc := range cases {
 		if got := tc.fn(); !math.IsNaN(got) {
 			t.Errorf("%s = %v, want NaN", tc.name, got)
 		}
+	}
+}
+
+func TestDownsideAndBetaForwardersMatchVec(t *testing.T) {
+	xs := []float64{-2, 1, -0.5, 3, -1}
+	ys := []float64{1, 2, 1.5, 4, 0.5}
+	if got, want := DownsideDeviation(xs, 0.2), vec.DownsideDeviation(xs, 0.2); math.Abs(got-want) > 1e-12 {
+		t.Errorf("DownsideDeviation = %v, want %v", got, want)
+	}
+	// Asymmetric xs/ys verifies Beta forwarder does not swap its arguments.
+	if got, want := Beta(xs, ys), vec.Beta(xs, ys); math.Abs(got-want) > 1e-12 {
+		t.Errorf("Beta(xs, ys) = %v, want %v", got, want)
 	}
 }

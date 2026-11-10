@@ -40,3 +40,15 @@ func CumCountTrue(mask []uint8) []int { return vec.CumCountTrue(mask) }
 // CumCountTrueTo stores the running count of non-zero mask entries into dst.
 // See [vec.CumCountTrueTo].
 func CumCountTrueTo(dst []int, mask []uint8) []int { return vec.CumCountTrueTo(dst, mask) }
+
+// Drawdown returns the underwater drawdown curve of xs. See [vec.Drawdown].
+func Drawdown(xs []float64) []float64 { return vec.Drawdown(xs) }
+
+// DrawdownTo stores the underwater drawdown curve of xs into dst. See [vec.DrawdownTo].
+func DrawdownTo(dst, xs []float64) []float64 { return vec.DrawdownTo(dst, xs) }
+
+// MaxDrawdown returns the worst peak-to-trough fractional decline of xs and its
+// 0-based peak, trough, and recovery indices. See [vec.MaxDrawdown].
+func MaxDrawdown(xs []float64) (maxDD float64, peakIdx, troughIdx, recoveryIdx int) {
+	return vec.MaxDrawdown(xs)
+}

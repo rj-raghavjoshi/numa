@@ -197,3 +197,33 @@ func ChaikinVolatility(high, low []float64, n int) []float64 {
 	}
 	return out
 }
+
+// RelativeVolume returns the ratio of each bar's volume to its trailing n-bar
+// simple average:
+//
+//	RVOL[i] = volume[i] / SMA(volume, n)[i]
+//
+// A reading above 1.0 indicates above-average participation (for example 2.0
+// means double the trailing n-bar average). A zero average yields 0 rather than
+// Inf. The first n-1 values are NaN.
+func RelativeVolume(volume []float64, n int) []float64 {
+	checkPeriod("RelativeVolume", n)
+	if len(volume) == 0 {
+		return nil
+	}
+	avg := SMA(volume, n)
+	out := allNaN(len(volume))
+	for i := n - 1; i < len(volume); i++ {
+		a := avg[i]
+		v := volume[i]
+		if a != a || v != v {
+			continue
+		}
+		if a == 0 {
+			out[i] = 0
+			continue
+		}
+		out[i] = v / a
+	}
+	return out
+}

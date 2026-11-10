@@ -270,6 +270,57 @@ func HarmMean(xs []float64) float64 {
 	return float64(n) / total
 }
 
+// DownsideDeviation returns the sample downside deviation of xs below target,
+// using the full observation count (n-1) as the denominator (the standard
+// Sortino convention):
+//
+//	sqrt(sum_{x < target} (x - target)^2 / (n - 1))
+//
+// Observations at or above target contribute 0 to the sum while still counting
+// toward n. Returns NaN when len(xs) < 2, target is NaN, or any element is NaN.
+func DownsideDeviation(xs []float64, target float64) float64 {
+	n := len(xs)
+	if n < 2 || target != target {
+		return math.NaN()
+	}
+	var sum float64
+	var nan bool
+	for _, x := range xs {
+		if x != x {
+			nan = true
+		} else if x < target {
+			d := x - target
+			sum += d * d
+		}
+	}
+	if nan {
+		return math.NaN()
+	}
+	return math.Sqrt(sum / float64(n-1))
+}
+
+// Beta returns the sample regression slope (market sensitivity) of xs against
+// ys over min(len(xs), len(ys)) elements:
+//
+//	Beta(xs, ys) = CovarianceSample(xs, ys) / VarianceSample(ys)
+//
+// Returns NaN for fewer than two observations, any NaN element, or a constant
+// benchmark series (zero variance in ys).
+func Beta(xs, ys []float64) float64 {
+	n := min(len(xs), len(ys))
+	if n < 2 {
+		return math.NaN()
+	}
+	mx := sumArch(xs[:n]) / float64(n)
+	my := sumArch(ys[:n]) / float64(n)
+	sxy := dotDevArch(xs[:n], ys[:n], mx, my)
+	syy := dotDevArch(ys[:n], ys[:n], my, my)
+	if syy == 0 || syy != syy || sxy != sxy {
+		return math.NaN()
+	}
+	return sxy / syy
+}
+
 // ---------------------------------------------------------------------------
 // Third and fourth deviation sums.
 //

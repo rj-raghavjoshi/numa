@@ -356,3 +356,76 @@ func TestStatsEmptyAndDegenerateInputs(t *testing.T) {
 		t.Errorf("Variance of a constant series = %v, want 0", got)
 	}
 }
+
+func TestDownsideDeviation(t *testing.T) {
+	// Observations: [-3, -1, 0, 2, 4], target = 0.
+	// Shortfalls below 0: (-3)^2 + (-1)^2 = 10, n-1 = 4 -> sqrt(10/4) = sqrt(2.5).
+	xs := []float64{-3, -1, 0, 2, 4}
+	got := DownsideDeviation(xs, 0)
+	want := math.Sqrt(2.5)
+	if math.Abs(got-want) > 1e-12 {
+		t.Fatalf("DownsideDeviation(xs, 0) = %v, want %v", got, want)
+	}
+
+	// Non-zero threshold: target = 1 -> shortfalls (-4)^2 + (-2)^2 + (-1)^2 = 21, n-1 = 4.
+	gotT := DownsideDeviation(xs, 1)
+	wantT := math.Sqrt(21.0 / 4.0)
+	if math.Abs(gotT-wantT) > 1e-12 {
+		t.Fatalf("DownsideDeviation(xs, 1) = %v, want %v", gotT, wantT)
+	}
+
+	// All observations >= target -> 0.
+	if gotZero := DownsideDeviation([]float64{1, 2, 3}, 1); gotZero != 0 {
+		t.Errorf("DownsideDeviation(all >= target) = %v, want 0", gotZero)
+	}
+
+	// Edge cases -> NaN.
+	if !math.IsNaN(DownsideDeviation(nil, 0)) || !math.IsNaN(DownsideDeviation([]float64{-1}, 0)) {
+		t.Error("DownsideDeviation with <2 elements should be NaN")
+	}
+	if !math.IsNaN(DownsideDeviation(xs, math.NaN())) {
+		t.Error("DownsideDeviation with NaN target should be NaN")
+	}
+	for i := range xs {
+		withNaN := append([]float64(nil), xs...)
+		withNaN[i] = math.NaN()
+		if !math.IsNaN(DownsideDeviation(withNaN, 0)) {
+			t.Errorf("DownsideDeviation with NaN at %d should be NaN", i)
+		}
+	}
+}
+
+func TestBeta(t *testing.T) {
+	ys := []float64{1, 2, 3, 5, 8}
+	xsPos := []float64{2, 4, 6, 10, 16}   // exactly 2*ys -> beta = 2
+	xsNeg := []float64{10, 9.5, 9, 8, 6.5} // slope -0.5
+
+	if got := Beta(xsPos, ys); math.Abs(got-2) > 1e-12 {
+		t.Errorf("Beta(2*y, y) = %v, want 2", got)
+	}
+	if got := Beta(xsNeg, ys); math.Abs(got-(-0.5)) > 1e-12 {
+		t.Errorf("Beta(-0.5*y+c, y) = %v, want -0.5", got)
+	}
+
+	// Asymmetric check against Cov/Var.
+	xs := []float64{3, 1, 4, 1, 5, 9, 2}
+	bs := []float64{2, 3, 5, 7, 11, 13, 17}
+	want := CovarianceSample(xs, bs) / VarianceSample(bs)
+	if got := Beta(xs, bs); math.Abs(got-want) > 1e-12 {
+		t.Errorf("Beta = %v, want Cov/Var = %v", got, want)
+	}
+
+	// Constant benchmark or <2 elements or NaN -> NaN.
+	if !math.IsNaN(Beta([]float64{1, 2, 3}, []float64{5, 5, 5})) {
+		t.Error("Beta with constant benchmark should be NaN")
+	}
+	if !math.IsNaN(Beta([]float64{1}, []float64{2})) || !math.IsNaN(Beta(nil, nil)) {
+		t.Error("Beta with <2 elements should be NaN")
+	}
+	if !math.IsNaN(Beta([]float64{1, math.NaN(), 3}, []float64{1, 2, 3})) {
+		t.Error("Beta with NaN in xs should be NaN")
+	}
+	if !math.IsNaN(Beta([]float64{1, 2, 3}, []float64{1, math.NaN(), 3})) {
+		t.Error("Beta with NaN in ys should be NaN")
+	}
+}

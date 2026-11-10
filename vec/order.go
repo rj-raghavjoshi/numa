@@ -294,6 +294,58 @@ func SortCopy(xs []float64) []float64 {
 	return out
 }
 
+// Argsort returns the 0-based indices that sort xs in ascending order.
+//
+// Equal values preserve their original relative order (stable tie-breaking by
+// index), and NaN values are placed at the end rather than corrupting ordering.
+// Returns nil for an empty input.
+func Argsort(xs []float64) []int {
+	if len(xs) == 0 {
+		return nil
+	}
+	return ArgsortTo(make([]int, len(xs)), xs)
+}
+
+// ArgsortTo writes the 0-based ascending sort permutation of xs into dst and
+// returns dst.
+//
+// dst and xs must have the same length; ArgsortTo panics otherwise.
+func ArgsortTo(dst []int, xs []float64) []int {
+	if len(dst) != len(xs) {
+		panic("vec: ArgsortTo length mismatch")
+	}
+	for i := range dst {
+		dst[i] = i
+	}
+	sort.Sort(argsortByValue{idx: dst, xs: xs})
+	return dst
+}
+
+type argsortByValue struct {
+	idx []int
+	xs  []float64
+}
+
+func (b argsortByValue) Len() int { return len(b.idx) }
+func (b argsortByValue) Less(i, j int) bool {
+	ai, aj := b.idx[i], b.idx[j]
+	xi, xj := b.xs[ai], b.xs[aj]
+	if xi != xi {
+		if xj != xj {
+			return ai < aj
+		}
+		return false
+	}
+	if xj != xj {
+		return true
+	}
+	if xi == xj {
+		return ai < aj
+	}
+	return xi < xj
+}
+func (b argsortByValue) Swap(i, j int) { b.idx[i], b.idx[j] = b.idx[j], b.idx[i] }
+
 // Rank assigns each element its 1-based rank in ascending order, with ties sharing
 // the average of the ranks they span.
 //

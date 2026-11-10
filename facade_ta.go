@@ -490,6 +490,12 @@ func ChaikinVolatility(high, low []float64, n int) []float64 {
 	return ta.ChaikinVolatility(high, low, n)
 }
 
+// RelativeVolume returns each bar's volume divided by its trailing n-bar SMA.
+// See [ta.RelativeVolume].
+func RelativeVolume(volume []float64, n int) []float64 {
+	return ta.RelativeVolume(volume, n)
+}
+
 // ChandeKrollStop returns the two trailing stops. See [ta.ChandeKrollStop].
 func ChandeKrollStop(high, low, close []float64, n int, x float64, q int) (stopLong, stopShort []float64) {
 	return ta.ChandeKrollStop(high, low, close, n, x, q)

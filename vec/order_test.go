@@ -463,3 +463,45 @@ func refRankBySorting(xs []float64) []float64 {
 	}
 	return out
 }
+
+func TestArgsort(t *testing.T) {
+	if got := Argsort(nil); got != nil {
+		t.Errorf("Argsort(nil) = %v, want nil", got)
+	}
+
+	// Verify stable tie-breaking and NaNs sorted to the end without mutating xs.
+	xs := []float64{30, 10, math.NaN(), 20, 10, math.NaN(), 5}
+	orig := append([]float64(nil), xs...)
+	idx := Argsort(xs)
+	want := []int{6, 1, 4, 3, 0, 2, 5}
+	if len(idx) != len(want) {
+		t.Fatalf("len(Argsort) = %d, want %d", len(idx), len(want))
+	}
+	for i := range want {
+		if idx[i] != want[i] {
+			t.Errorf("Argsort[%d] = %d, want %d (full=%v)", i, idx[i], want[i], idx)
+		}
+		if math.IsNaN(orig[i]) {
+			if !math.IsNaN(xs[i]) {
+				t.Errorf("xs[%d] mutated", i)
+			}
+		} else if xs[i] != orig[i] {
+			t.Errorf("xs[%d] mutated to %v", i, xs[i])
+		}
+	}
+
+	dst := make([]int, len(xs))
+	ArgsortTo(dst, xs)
+	for i := range want {
+		if dst[i] != want[i] {
+			t.Errorf("ArgsortTo[%d] = %d, want %d", i, dst[i], want[i])
+		}
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Error("ArgsortTo did not panic on length mismatch")
+		}
+	}()
+	ArgsortTo(make([]int, 2), xs)
+}

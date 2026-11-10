@@ -123,6 +123,7 @@ func TestOrderForwardersPanicLikeVec(t *testing.T) {
 		{"MedianInto small buf", func() { MedianInto(xs, small) }},
 		{"QuantileInto small buf", func() { QuantileInto(xs, 0.5, small) }},
 		{"RankTo length", func() { RankTo(small, xs) }},
+		{"ArgsortTo length", func() { ArgsortTo(make([]int, 2), xs) }},
 	}
 
 	for _, tc := range cases {
@@ -134,5 +135,23 @@ func TestOrderForwardersPanicLikeVec(t *testing.T) {
 			}()
 			tc.fn()
 		})
+	}
+}
+
+func TestArgsortForwardersMatchVec(t *testing.T) {
+	xs := []float64{4, 1, 4, 2}
+	got := Argsort(xs)
+	want := vec.Argsort(xs)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Argsort[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+	dst := make([]int, len(xs))
+	ArgsortTo(dst, xs)
+	for i := range want {
+		if dst[i] != want[i] {
+			t.Fatalf("ArgsortTo[%d] = %d, want %d", i, dst[i], want[i])
+		}
 	}
 }

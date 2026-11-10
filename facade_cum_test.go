@@ -109,6 +109,7 @@ func TestCumulativeForwardersPanicLikeVec(t *testing.T) {
 		{"CumMaxTo", func() { CumMaxTo(short, long) }},
 		{"CumMinTo", func() { CumMinTo(short, long) }},
 		{"CumCountTrueTo", func() { CumCountTrueTo(shortI, longM) }},
+		{"DrawdownTo", func() { DrawdownTo(short, long) }},
 	}
 
 	for _, tc := range cases {
@@ -120,5 +121,33 @@ func TestCumulativeForwardersPanicLikeVec(t *testing.T) {
 			}()
 			tc.fn()
 		})
+	}
+}
+
+func TestDrawdownForwardersMatchVec(t *testing.T) {
+	xs := []float64{100, 120, 90, 110, 125}
+	got := Drawdown(xs)
+	want := vec.Drawdown(xs)
+	if len(got) != len(want) {
+		t.Fatalf("len(Drawdown) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if math.Abs(got[i]-want[i]) > 1e-12 {
+			t.Errorf("Drawdown[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+
+	dst := make([]float64, len(xs))
+	DrawdownTo(dst, xs)
+	for i := range want {
+		if math.Abs(dst[i]-want[i]) > 1e-12 {
+			t.Errorf("DrawdownTo[%d] = %v, want %v", i, dst[i], want[i])
+		}
+	}
+
+	dd, p, tr, rec := MaxDrawdown(xs)
+	wdd, wp, wtr, wrec := vec.MaxDrawdown(xs)
+	if math.Abs(dd-wdd) > 1e-12 || p != wp || tr != wtr || rec != wrec {
+		t.Errorf("MaxDrawdown = (%v, %d, %d, %d), want (%v, %d, %d, %d)", dd, p, tr, rec, wdd, wp, wtr, wrec)
 	}
 }

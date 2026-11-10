@@ -51,3 +51,12 @@ func GeoMean(xs []float64) float64 { return vec.GeoMean(xs) }
 
 // HarmMean returns the harmonic mean of xs. See [vec.HarmMean].
 func HarmMean(xs []float64) float64 { return vec.HarmMean(xs) }
+
+// DownsideDeviation returns the sample downside deviation of xs below target.
+// See [vec.DownsideDeviation].
+func DownsideDeviation(xs []float64, target float64) float64 {
+	return vec.DownsideDeviation(xs, target)
+}
+
+// Beta returns the sample regression slope of xs against benchmark ys. See [vec.Beta].
+func Beta(xs, ys []float64) float64 { return vec.Beta(xs, ys) }

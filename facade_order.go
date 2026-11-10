@@ -70,3 +70,10 @@ func MAD(xs []float64) float64 { return vec.MAD(xs) }
 func RankScratchTo(dst, xs []float64, scratch []int) []float64 {
 	return vec.RankScratchTo(dst, xs, scratch)
 }
+
+// Argsort returns the 0-based indices that sort xs ascending. See [vec.Argsort].
+func Argsort(xs []float64) []int { return vec.Argsort(xs) }
+
+// ArgsortTo writes the 0-based ascending sort permutation of xs into dst.
+// See [vec.ArgsortTo].
+func ArgsortTo(dst []int, xs []float64) []int { return vec.ArgsortTo(dst, xs) }

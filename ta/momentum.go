@@ -412,13 +412,9 @@ func ROC(close []float64, n int) []float64 {
 		return nil
 	}
 	rates := vec.Rate(close, n)
-	out := make([]float64, len(close))
-	for i, r := range rates {
-		// Rate reports NaN for the warm-up and 0 for a zero base; scaling preserves
-		// both, and NaN*100 is still NaN.
-		out[i] = 100 * r
-	}
-	return out
+	// Rate reports NaN for the warm-up and 0 for a zero base; scaling preserves
+	// both, and NaN*100 is still NaN.
+	return vec.Scale(rates, 100)
 }
 
 // Momentum returns the n-period price difference close[i] - close[i-n].

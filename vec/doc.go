@@ -77,4 +77,4 @@
 package vec
 
 // Version is the current semantic release of the numa engine.
-const Version = "0.1.0"
+const Version = "0.2.0"

@@ -92,7 +92,7 @@ non-symmetric eigensolver · out-of-core/memory-mapped arrays.
 
 - **Layering.** Import `numa` (facade), `numa/series`, `numa/mat` directly. Never
   add engine types to numa.
-- **Packaging.** numa currently has **no git tags** (`Version = "0.1.0"`). Tag a
+- **Packaging.** numa currently has **no git tags** (`Version = "0.2.0"`). Tag a
   `v0.x` release or use a `replace` directive for local development before the
   engine depends on it.
 - **Result schema.** Version the backtest output (params, seed, numa version,

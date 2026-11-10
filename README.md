@@ -7,6 +7,11 @@ Engineered for quantitative modeling, time-series analysis, and algorithmic
 trading systems where allocation overhead and floating-point stalls are
 unacceptable.
 
+**0.2.0** adds the reversed and scalar division/subtraction kernels
+(`SubScalar`, `RSubScalar`, `DivScalar`, `RDivScalar`) and the allocation-free
+`CountGreaterScalar`/`CountGreaterEqualScalar` reductions, so a caller never has
+to materialise a broadcast array for `xs-k`, `k/xs`, or a count.
+
 ## Documentation
 
 | document | read it if you want to… |
@@ -132,6 +137,8 @@ func main() {
 | `Min(xs)` | smallest element | `+Inf` |
 | `Max(xs)` | largest element | `-Inf` |
 | `MinMax(xs)` | smallest and largest, one pass | `(+Inf, -Inf)` |
+| `CountGreaterScalar(xs, k)` | count of elements `> k` | `0` |
+| `CountGreaterEqualScalar(xs, k)` | count of elements `>= k` | `0` |
 
 **Elementwise** — two forms each. The allocating form returns a new slice of
 length `min(len(xs), len(ys))`; the `To` form writes into a caller-supplied
@@ -144,6 +151,10 @@ buffer and panics on a length mismatch:
 | `Mul(xs, ys)` | `MulTo(dst, xs, ys)` | `xs[i] * ys[i]` |
 | `Scale(xs, k)` | `ScaleTo(dst, xs, k)` | `xs[i] * k` |
 | `AddScalar(xs, k)` | `AddScalarTo(dst, xs, k)` | `xs[i] + k` |
+| `SubScalar(xs, k)` | `SubScalarTo(dst, xs, k)` | `xs[i] - k` |
+| `RSubScalar(xs, k)` | `RSubScalarTo(dst, xs, k)` | `k - xs[i]` |
+| `DivScalar(xs, k)` | `DivScalarTo(dst, xs, k)` | `xs[i] / k` |
+| `RDivScalar(xs, k)` | `RDivScalarTo(dst, xs, k)` | `k / xs[i]` |
 | `Abs(xs)` | `AbsTo(dst, xs)` | `abs(xs[i])` |
 
 All `*To` functions permit `dst` to alias the inputs, with one documented

@@ -41,7 +41,7 @@ import (
 )
 
 // Version is the current semantic release of the numa engine.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Sum returns the arithmetic sum of xs. See [vec.Sum].
 func Sum(xs []float64) float64 { return vec.Sum(xs) }
